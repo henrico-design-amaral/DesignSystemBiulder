@@ -1,46 +1,44 @@
-# Capturar — Website Downloader
+# Capturar
 
-Ferramenta web para baixar réplicas completas de qualquer site, incluindo conteúdo renderizado por JavaScript.
+Ferramenta web para capturar páginas públicas e gerar um pacote offline com `index.html`, assets locais e, quando disponível, `design-system.html`.
 
-![screenshot](https://i.imgur.com/placeholder.png)
+## O que esta versão faz de verdade
 
-## Como funciona
+- Renderiza a página com Playwright + Chromium.
+- Rola a página para tentar acionar lazy loading.
+- Reescreve referências do HTML e `url(...)` de CSS inline e CSS baixado.
+- Empacota a captura em ZIP.
+- Gera um `design-system.html` por fallback local e, opcionalmente, por API externa quando `ANTHROPIC_API_KEY` estiver configurada.
 
-1. **Captura** — Playwright abre um Chromium headless e renderiza a página com JS real
-2. **Lazy loading** — Rola a página automaticamente para forçar o carregamento de imagens
-3. **Processamento** — BeautifulSoup reescreve todas as URLs para caminhos locais
-4. **Limpeza** — Remove scripts de hydration (Next.js, Nuxt, Gatsby) e smooth scroll libs que quebram offline
-5. **Empacotamento** — Cria um ZIP com tudo: HTML, CSS, JS, imagens, fontes
-6. **Progresso** — Logs em tempo real via Server-Sent Events
+## Limites reais
+
+- Não suporta login, sessão autenticada ou navegação multi-step.
+- Não é um espelho perfeito de qualquer SPA complexa.
+- Alguns sites podem manter dependências remotas ou quebrar interações avançadas offline.
+- Destinos privados, locais ou reservados são bloqueados por segurança.
 
 ## Stack
 
-- **Backend:** Python + Flask + Playwright + BeautifulSoup
-- **Frontend:** HTML/CSS/JS puro (sem frameworks)
-- **Deploy:** Docker, Render, Railway
+- Backend: Flask + Gunicorn
+- Captura: Playwright + Chromium
+- Parsing: BeautifulSoup
+- Deploy: Docker + Railway
 
 ## Rodar localmente
 
-### Com uv (recomendado)
+### Com `uv`
 
 ```bash
-# Clonar
-git clone https://github.com/seu-usuario/capturar
+git clone <seu-repo>
 cd capturar
-
-# Instalar dependências
 uv sync
-
-# Instalar Chromium
 uv run playwright install chromium
-
-# Rodar
 uv run python app.py
 ```
 
-Acesse: http://localhost:5001
+Acesse: `http://localhost:8080`
 
-### Com pip
+### Com `pip`
 
 ```bash
 pip install -r requirements.txt
@@ -52,71 +50,89 @@ python app.py
 
 ```bash
 docker build -t capturar .
-docker run -p 5001:5001 capturar
+docker run --rm -p 8080:8080 capturar
 ```
 
-## Deploy em produção
+## Variáveis de ambiente
 
-### Render
+Copie `.env.example` como base. As mais importantes:
 
-1. Fork este repositório
-2. Crie um novo serviço em [render.com](https://render.com) → **New Web Service**
-3. Conecte o repositório
-4. Render detecta o `render.yaml` automaticamente
-5. Deploy
+```bash
+PORT=8080
+DOWNLOAD_RETENTION_SECONDS=600
+MAX_CONCURRENT_JOBS=2
+RATE_LIMIT_WINDOW_SECONDS=60
+RATE_LIMIT_MAX_REQUESTS=5
+MAX_ASSET_BYTES=26214400
+MAX_CAPTURED_RESOURCES=600
+APP_API_TOKEN=
+ALLOWED_DOMAIN_SUFFIXES=
+DENIED_DOMAIN_SUFFIXES=localhost,local,internal,test,example,invalid
+DESIGN_SYSTEM_MODE=auto
+ANTHROPIC_API_KEY=
+```
 
-### Railway
+### Recomendações para produção
 
-1. Fork este repositório
-2. Crie um novo projeto em [railway.app](https://railway.app)
-3. **Deploy from GitHub repo** → selecione o repositório
-4. Railway detecta o `railway.toml` automaticamente
-5. Deploy
+- Defina `APP_API_TOKEN` se o serviço não for público.
+- Use `ALLOWED_DOMAIN_SUFFIXES` se quiser restringir a captura a domínios confiáveis.
+- Configure `ANTHROPIC_API_KEY` apenas se quiser tentar geração externa do design system.
+- Mantenha `DESIGN_SYSTEM_MODE=fallback` se quiser previsibilidade e custo zero de API.
+
+## Deploy no Railway
+
+### Via GitHub
+
+1. Suba este projeto em um repositório Git.
+2. No Railway, crie um novo serviço apontando para o repositório.
+3. O Railway usará o `Dockerfile` deste projeto.
+4. Configure pelo menos estas variáveis:
+   - `PORT=8080`
+   - `APP_API_TOKEN` opcional
+   - `ANTHROPIC_API_KEY` opcional
+5. Confirme que o healthcheck está em `/healthz`.
+
+### Via CLI
+
+```bash
+railway up
+```
 
 ## Estrutura do projeto
 
-```
+```text
 capturar/
-├── app.py              # Servidor Flask — rotas e SSE
-├── downloader.py       # Lógica de captura e processamento
+├── app.py
+├── downloader.py
+├── design_system_generator.py
 ├── templates/
-│   └── index.html      # Interface do usuário
-├── downloads/          # ZIPs temporários (auto-limpeza após 10min)
+│   └── index.html
+├── downloads/
 ├── Dockerfile
-├── render.yaml
 ├── railway.toml
-├── pyproject.toml
-└── requirements.txt
+├── requirements.txt
+├── .env.example
+└── .dockerignore
 ```
 
-## Limitações
+## Melhorias aplicadas nesta revisão
 
-- Sites com autenticação não são suportados
-- SPAs com roteamento dinâmico capturam apenas a página raiz
-- Sites com CSP muito restrito podem ter assets faltando
+- bloqueio de SSRF básico para destinos privados/locais
+- rate limit em memória
+- limitação de concorrência
+- limpeza automática de arquivos expirados
+- assets temporários em disco em vez de RAM
+- reescrita de `url(...)` também nos CSS baixados
+- rota dedicada para abrir `design-system.html`
+- frontend alinhado com os metadados reais do backend
+- documentação alinhada com o comportamento atual
 
-## Licença
+## Healthcheck
 
-Uso pessoal e educacional.
+`GET /healthz`
 
-## Design System Generator
+Resposta esperada:
 
-Após cada download, o sistema gera automaticamente um `design-system.html` extraído do HTML capturado.
-
-O arquivo documenta:
-- **Hero** — clone exato do original
-- **Typography** — escala tipográfica real do DOM
-- **Colors & Surfaces** — cores extraídas de classes Tailwind arbitrárias e camadas glass
-- **Components** — nav, botões, badges, cards retirados literalmente do markup
-- **Layout** — containers, grids e ritmo de espaçamento
-- **Motion** — keyframes e classes de transição do CSS original
-- **Icons** — conjunto de ícones com markup exato (se presente)
-
-O botão **Design System** aparece ao lado do **Baixar ZIP** após a captura ser concluída. O arquivo abre em nova aba e expira junto com o ZIP (10 minutos).
-
-### Regras de extração
-
-- Nunca reinventa classes
-- Nunca cria componentes ausentes do HTML fonte  
-- Sempre referencia os assets originais (CSS, JS, fontes)
-- Nunca normaliza markup nem interpola estilos
+```json
+{"status":"ok","active_capacity":2,"retention_seconds":600}
+```

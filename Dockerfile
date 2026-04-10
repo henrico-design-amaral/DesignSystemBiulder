@@ -1,30 +1,45 @@
 FROM python:3.12-slim
 
-# Dependências do sistema para o Chromium
-RUN apt-get update && apt-get install -y \
-    wget curl gnupg ca-certificates \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-    libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-    libpango-1.0-0 libcairo2 libasound2 libxshmfence1 \
-    fonts-liberation libappindicator3-1 xdg-utils \
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    fonts-liberation \
+    gnupg \
+    libcairo2 \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libgbm1 \
+    libglib2.0-0 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Instala dependências Python
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Instala Playwright + Chromium dentro do container
-# PLAYWRIGHT_BROWSERS_PATH garante que fica em local conhecido
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pip install --upgrade pip && pip install -r requirements.txt
 RUN playwright install chromium --with-deps
 
-# Copia código
 COPY . .
+RUN mkdir -p /app/downloads
 
-# Pasta de downloads temporários
-RUN mkdir -p downloads
-
-# Railway injeta PORT dinamicamente
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --timeout 180 --worker-class sync --log-level debug"]
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --worker-class gthread --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-240} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30} --log-level ${LOG_LEVEL:-info}"]
