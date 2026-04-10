@@ -70,13 +70,11 @@ def download():
 
             if zip_path.exists():
                 size = zip_path.stat().st_size
-                ds_path = DOWNLOADS_DIR / f"{job_id}-design-system.html"
                 yield from emit({
                     "type": "done",
                     "filename": zip_path.name,
                     "size": size,
                     "downloadUrl": f"/file/{job_id}",
-                    "designSystemUrl": f"/design-system/{job_id}" if ds_path.exists() else None,
                 })
             else:
                 yield from emit({"type": "error", "msg": "Falha ao gerar o arquivo ZIP."})
@@ -99,14 +97,6 @@ def get_file(job_id):
         return jsonify({"error": "Arquivo não encontrado ou expirado."}), 404
     return send_file(zip_path, as_attachment=True, download_name=zip_path.name)
 
-
-@app.route("/design-system/<job_id>")
-def get_design_system(job_id):
-    safe_id = "".join(c for c in job_id if c.isalnum() or c == "-")
-    ds_path = DOWNLOADS_DIR / f"{safe_id}-design-system.html"
-    if not ds_path.exists():
-        return jsonify({"error": "Design system não encontrado ou expirado."}), 404
-    return send_file(ds_path, mimetype="text/html")
 
 
 if __name__ == "__main__":

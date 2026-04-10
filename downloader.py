@@ -257,42 +257,46 @@ def download_site(url: str, zip_path: Path, options: dict):
         soup.head.append(fix_css)
 
     # ------------------------------------------------------------------
-    # 4. Empacotar em ZIP
+    # 4. Gerar design-system.html (antes do ZIP para incluir no pacote)
     # ------------------------------------------------------------------
-    yield ev(f"Empacotando {len(asset_map)} assets em ZIP...", progress=92)
+    yield ev("Extraindo design system do HTML capturado...", progress=90)
+    html_str = str(soup)
+    ds_html = None
+    try:
+        from design_system_generator import generate_design_system
+        ds_html = generate_design_system(html_str)
+        if ds_html:
+            yield ev("Design system gerado — incluindo no ZIP...", level="accent", progress=93)
+        else:
+            yield ev("Design system: evidência insuficiente no HTML, ignorado.", level="")
+    except Exception as e:
+        yield ev(f"Aviso: design system ignorado ({e})", level="")
+
+    # ------------------------------------------------------------------
+    # 5. Empacotar tudo em um único ZIP
+    #    Estrutura: index.html + design-system.html + assets/
+    # ------------------------------------------------------------------
+    total_files = len(asset_map) + 1 + (1 if ds_html else 0)
+    yield ev(f"Empacotando {total_files} arquivos em ZIP...", progress=95)
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # HTML principal
-        zf.writestr("index.html", str(soup))
+        # index.html
+        zf.writestr("index.html", html_str)
 
-        # Assets
+        # design-system.html — no mesmo nível do index
+        if ds_html:
+            zf.writestr("design-system.html", ds_html)
+
+        # assets/
         for abs_url, local_path in asset_map.items():
             data = resources.get(abs_url)
             if data:
                 zf.writestr(local_path, data)
 
     size_kb = zip_path.stat().st_size // 1024
+    ds_note = " + design-system.html" if ds_html else ""
     yield ev(
-        f"ZIP gerado com {len(asset_map) + 1} arquivos ({size_kb} KB).",
+        f"Concluído. ZIP com index.html{ds_note} + {len(asset_map)} assets ({size_kb} KB).",
         level="success",
-        progress=97,
+        progress=100,
     )
-
-    # ------------------------------------------------------------------
-    # 5. Gerar design-system.html
-    # ------------------------------------------------------------------
-    yield ev("Extraindo design system do HTML capturado...", progress=98)
-    try:
-        from design_system_generator import generate_design_system
-        ds_path = zip_path.with_name(zip_path.stem + "-design-system.html")
-        ok = generate_design_system(zip_path, ds_path)
-        if ok:
-            yield ev(
-                f"Design system gerado → {ds_path.name}",
-                level="accent",
-                progress=100,
-            )
-        else:
-            yield ev("Design system não pôde ser gerado (HTML sem evidência suficiente).", level="")
-    except Exception as e:
-        yield ev(f"Aviso: design system ignorado ({e})", level="")

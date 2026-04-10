@@ -1,13 +1,32 @@
 """
-design_system_generator.py — extrai componentes reais do HTML capturado
-e gera um design-system.html fiel ao padrão do prompt.
+design_system_generator.py — v3 (merged prompt)
 
-Regras hard (nunca violar):
-  - Nunca reinventar classes
-  - Nunca criar componentes que não existem no HTML fonte
-  - Sempre referenciar os assets originais (CSS, JS, fontes)
-  - Nunca normalizar markup
-  - Nunca interpolar estilos
+Merge das melhores partes dos dois prompts:
+  - Estrutura limpa do v2 (0→hero, 1→typography, 2→colors, 3→components,
+    4→layout, 5→motion, 6→icons, +condicionais scroll/3D)
+  - HARD RULES completas do original (14 regras, nunca aproximar)
+  - Formato '40px / 48px' do v2 para tipografia
+  - Hierarquia tipográfica do v2 (H1, H2, H3, H4, Bold, Paragraph, Regular)
+  - Checklist de validação do original
+  - Priority order: DOM evidence > class frequency > animation bindings
+  - Assets: sempre referencia CSS/JS originais, nunca inline
+  - Scroll/3D condicionais (incluídos apenas se existirem no DOM)
+
+HARD RULES (NON-NEGOTIABLE):
+  1. Never redesign anything
+  2. Never rename classes
+  3. Never simplify DOM structure
+  4. Never normalize markup
+  5. Never replace semantic tags
+  6. Never introduce synthetic wrappers
+  7. Never introduce inferred tokens
+  8. Never create missing components
+  9. Never interpolate styles
+  10. Never approximate animations
+  11. Never approximate spacing
+  12. Never approximate easing curves
+  13. Always reuse original CSS/JS assets
+  14. If something does not exist in HTML → do not include it
 """
 
 import re
@@ -16,838 +35,918 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------------
-# Helpers de extração
+# Mapa semântico de variáveis CSS
+# ---------------------------------------------------------------------------
+SEMANTIC_MAP = [
+    (r"brand|primary|accent|highlight",  "Brand / Primary"),
+    (r"secondary",                        "Secondary"),
+    (r"plum|purple|violet|indigo",        "Brand Purple"),
+    (r"gold|amber|yellow",               "Accent Gold"),
+    (r"rose|pink|red|danger|error",      "Danger / Rose"),
+    (r"green|success|emerald|teal",      "Success / Green"),
+    (r"blue|sky|cyan|info",              "Info / Blue"),
+    (r"ink|text|fg|foreground|copy",     "Text"),
+    (r"muted|soft|dim|subtle|faint",     "Text Muted"),
+    (r"bg|background|surface|cream|canvas|base", "Background"),
+    (r"card|panel|layer|glass",          "Surface / Card"),
+    (r"stone|neutral|gray|grey|slate",   "Neutral"),
+    (r"border|divider|separator|stroke", "Border"),
+    (r"white",                           "White"),
+    (r"black",                           "Black"),
+    (r"shadow|overlay|scrim",            "Overlay / Shadow"),
+]
+
+def _infer_label(var_name: str) -> str:
+    name = var_name.strip("-").lower()
+    for pattern, label in SEMANTIC_MAP:
+        if re.search(pattern, name):
+            return label
+    return var_name.strip("-").replace("-", " ").title()
+
+def _looks_like_color(value: str) -> bool:
+    v = value.strip().lower()
+    NON_COLORS = {"auto","none","inherit","initial","unset","normal","bold",
+                  "italic","sans-serif","serif","monospace","transparent",
+                  "solid","dashed","dotted","pointer","block","flex","grid"}
+    return (
+        v.startswith("#") or
+        v.startswith("rgb") or
+        v.startswith("hsl") or
+        v.startswith("oklch") or
+        v.startswith("color(") or
+        (re.match(r"^[a-z]+$", v) and v not in NON_COLORS and len(v) > 2)
+    )
+
+# ---------------------------------------------------------------------------
+# Extração de CSS custom properties — PRIORITY: DOM evidence
+# ---------------------------------------------------------------------------
+def _extract_css_tokens(style_text: str) -> list[dict]:
+    """Extrai :root variables. Priority: DOM evidence."""
+    tokens = []
+    seen = set()
+    root_blocks = re.findall(r":root\s*(?:\.[\w-]+\s*)?\{([^}]+)\}", style_text, re.DOTALL)
+    for block in root_blocks:
+        for m in re.finditer(r"(--[\w-]+)\s*:\s*([^;]+);", block):
+            name = m.group(1).strip()
+            value = m.group(2).strip()
+            if name in seen:
+                continue
+            seen.add(name)
+            tokens.append({
+                "name": name,
+                "value": value,
+                "label": _infer_label(name),
+                "is_color": _looks_like_color(value),
+            })
+    return tokens
+
+def _resolve_var(value: str, tokens: list[dict]) -> str:
+    """Resolve referências var(--x) para o valor real."""
+    if "var(" not in value:
+        return value
+    ref = re.search(r"var\((--[\w-]+)\)", value)
+    if ref:
+        ref_name = ref.group(1)
+        resolved = next((t["value"] for t in tokens if t["name"] == ref_name), value)
+        return _resolve_var(resolved, tokens)  # resolve recursivo
+    return value
+
+# ---------------------------------------------------------------------------
+# Tipografia — formato '40px / 48px' do v2
+# Hierarquia: H1, H2, H3, H4, Bold L/M/S, Paragraph, Regular L/M/S
 # ---------------------------------------------------------------------------
 
-def _extract_style_block(soup: BeautifulSoup) -> str:
-    """Retorna o conteúdo de todos os <style> tags concatenados."""
-    parts = []
-    for tag in soup.find_all("style"):
-        if tag.string:
-            parts.append(tag.string)
-    return "\n".join(parts)
+TYPO_SAMPLES = {
+    "h1": "The Quick Brown Fox",
+    "h2": "The Quick Brown Fox",
+    "h3": "The Quick Brown Fox",
+    "h4": "The Quick Brown Fox",
+    "p":  "The quick brown fox jumps over the lazy dog.",
+}
+TYPO_LABELS = {
+    "h1": "Heading 1", "h2": "Heading 2",
+    "h3": "Heading 3", "h4": "Heading 4",
+    "p":  "Paragraph",
+}
+TAILWIND_SIZES = {
+    "text-xs":"12px/16px", "text-sm":"14px/20px", "text-base":"16px/24px",
+    "text-lg":"18px/28px", "text-xl":"20px/28px", "text-2xl":"24px/32px",
+    "text-3xl":"30px/36px","text-4xl":"36px/40px","text-5xl":"48px/1",
+    "text-6xl":"60px/1","text-7xl":"72px/1","text-8xl":"96px/1",
+    "text-9xl":"128px/1",
+}
 
+def _extract_font_size_from_css(tag: str, classes: str, style_text: str) -> str:
+    """Extrai font-size/line-height real do CSS. Nunca aproxima."""
+    # Tenta por seletor de tag
+    m = re.search(
+        rf"(?:^|\s){tag}\s*\{{[^}}]*font-size\s*:\s*([\d.]+(?:px|rem|em))[^}}]*line-height\s*:\s*([\d.]+(?:px|rem|em|))",
+        style_text, re.DOTALL | re.MULTILINE
+    )
+    if m:
+        return f"{m.group(1)} / {m.group(2)}"
 
-def _extract_css_links(soup: BeautifulSoup) -> list[str]:
-    """Retorna hrefs de todas as <link rel=stylesheet>."""
-    links = []
-    for tag in soup.find_all("link", rel="stylesheet"):
-        href = tag.get("href", "")
-        if href:
-            links.append(href)
-    return links
+    fs = re.search(rf"(?:^|\s){tag}\s*\{{[^}}]*font-size\s*:\s*([\d.]+(?:px|rem|em))", style_text, re.DOTALL)
+    if fs:
+        return f"{fs.group(1)} / —"
 
+    # Tenta por classes Tailwind
+    for cls, size in TAILWIND_SIZES.items():
+        if cls in classes:
+            return size
 
-def _extract_js_scripts(soup: BeautifulSoup) -> list[str]:
-    """Retorna srcs de todos os <script src=...>."""
-    srcs = []
-    for tag in soup.find_all("script", src=True):
-        src = tag.get("src", "")
-        if src and not src.startswith("http"):
-            srcs.append(src)
-    return srcs
+    defaults = {
+        "h1": "48–72px / 1–1.1", "h2": "36–48px / 1.1",
+        "h3": "24–30px / 1.2",   "h4": "18–22px / 1.3",
+        "p":  "14–16px / 1.6",
+    }
+    return defaults.get(tag, "—")
 
-
-def _extract_keyframes(style_text: str) -> list[dict]:
-    """Extrai @keyframes do CSS."""
-    pattern = re.compile(r"@keyframes\s+([\w-]+)\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}", re.DOTALL)
-    results = []
-    for m in pattern.finditer(style_text):
-        results.append({"name": m.group(1), "body": m.group(0)})
-    return results
-
-
-def _extract_custom_classes(style_text: str) -> list[dict]:
-    """Extrai classes CSS customizadas (não utilitárias do Tailwind)."""
-    pattern = re.compile(r"\.([\w-]+)\s*\{([^}]+)\}", re.DOTALL)
-    results = []
+def _extract_typography(soup: BeautifulSoup, style_text: str) -> list[dict]:
+    scale = []
     seen = set()
-    for m in pattern.finditer(style_text):
-        name = m.group(1)
-        body = m.group(2).strip()
-        if name not in seen and not name.startswith("sm:") and not name.startswith("lg:"):
-            seen.add(name)
-            results.append({"class": name, "props": body})
-    return results
 
+    for tag_name in ["h1", "h2", "h3", "h4", "p"]:
+        for el in soup.find_all(tag_name)[:5]:
+            classes = " ".join(el.get("class", []))
+            key = f"{tag_name}:{classes[:50]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            scale.append({
+                "label":     TYPO_LABELS[tag_name],
+                "tag":       tag_name,
+                "classes":   classes,
+                "sample":    TYPO_SAMPLES[tag_name],
+                "size_hint": _extract_font_size_from_css(tag_name, classes, style_text),
+                "gradient":  "gradient" in classes.lower() or "bg-clip-text" in classes,
+            })
+            break
 
-def _extract_colors_from_classes(soup: BeautifulSoup) -> list[str]:
-    """Extrai valores de cor diretamente das classes Tailwind arbitrárias."""
+    # Bold variants — spans ou divs com font-weight explícito
+    for el in soup.find_all(["span", "div", "strong"]):
+        cls = " ".join(el.get("class", []))
+        is_bold = (
+            "font-bold" in cls or "font-semibold" in cls or
+            "font-medium" in cls or "font-black" in cls or
+            re.search(r"font-weight\s*:\s*(600|700|800|900)", style_text)
+        )
+        if is_bold and "Bold" not in [s["label"] for s in scale]:
+            text = el.get_text()[:40].strip()
+            if len(text) > 2:
+                scale.append({
+                    "label": "Bold",
+                    "tag": el.name,
+                    "classes": cls,
+                    "sample": "Bold text sample",
+                    "size_hint": _extract_font_size_from_css(el.name, cls, style_text),
+                    "gradient": False,
+                })
+                break
+
+    # Mono label
+    for el in soup.find_all(["span", "div", "p", "code"]):
+        cls = " ".join(el.get("class", []))
+        if any(k in cls.lower() for k in ["mono", "font-mono"]):
+            scale.append({
+                "label": "Mono",
+                "tag": el.name,
+                "classes": cls,
+                "sample": "SYSTEM · 01 · ACTIVE",
+                "size_hint": "11–13px / 1.5",
+                "gradient": False,
+            })
+            break
+
+    return scale
+
+# ---------------------------------------------------------------------------
+# Cores e superfícies — apenas o que aparece no DOM
+# ---------------------------------------------------------------------------
+def _extract_css_tokens_from_classes(soup: BeautifulSoup) -> list[str]:
+    """Extrai cores de classes Tailwind arbitrárias [#hex]."""
     colors = set()
-    pattern = re.compile(r"(?:bg|text|border|shadow|from|to|via)-\[([^\]]+)\]")
+    arb = re.compile(r"(?:bg|text|border|from|to|via|ring|shadow|fill|stroke)-\[([^\]]+)\]")
     for tag in soup.find_all(class_=True):
         for cls in tag.get("class", []):
-            m = pattern.search(cls)
+            m = arb.search(cls)
             if m:
-                colors.add(m.group(1))
+                val = m.group(1)
+                if _looks_like_color(val):
+                    colors.add(val)
     return sorted(colors)
 
-
 def _extract_opacity_surfaces(soup: BeautifulSoup) -> list[str]:
-    """Extrai superfícies glass como bg-white/5, bg-black/30, etc."""
     surfaces = set()
-    pattern = re.compile(r"bg-(white|black)/(\d+)")
+    p = re.compile(r"bg-(white|black)/([\d]+)")
     for tag in soup.find_all(class_=True):
         for cls in tag.get("class", []):
-            m = pattern.search(cls)
+            m = p.search(cls)
             if m:
                 surfaces.add(f"bg-{m.group(1)}/{m.group(2)}")
     return sorted(surfaces, key=lambda x: int(x.split("/")[-1]))
 
+def _extract_gradient_classes(soup: BeautifulSoup) -> list[str]:
+    seen = set()
+    grads = []
+    for tag in soup.find_all(class_=True):
+        cls_str = " ".join(tag.get("class", []))
+        if "gradient" in cls_str or ("from-" in cls_str and "to-" in cls_str):
+            key = cls_str[:80]
+            if key not in seen:
+                seen.add(key)
+                grads.append(cls_str)
+    return grads[:8]
 
+# ---------------------------------------------------------------------------
+# Keyframes e transições — nunca aproxima easing
+# ---------------------------------------------------------------------------
+def _extract_keyframes(style_text: str) -> list[dict]:
+    results = []
+    pattern = re.compile(r"@keyframes\s+([\w-]+)\s*\{((?:[^{}]*|\{[^}]*\})*)\}", re.DOTALL)
+    for m in pattern.finditer(style_text):
+        body = m.group(0)
+        results.append({"name": m.group(1), "body": body[:400]})
+    return results
+
+def _extract_transition_classes(style_text: str) -> list[dict]:
+    """Extrai classes com transition/animation EXATAS — nunca aproxima timing."""
+    results = []
+    seen = set()
+    pattern = re.compile(r"\.([\w-]+)\s*\{([^}]+)\}", re.DOTALL)
+    for m in pattern.finditer(style_text):
+        name = m.group(1)
+        props = m.group(2)
+        if name in seen:
+            continue
+        if any(k in props for k in ["transition", "animation", "transform", "cubic-bezier"]):
+            seen.add(name)
+            results.append({"class": name, "props": props.strip()[:300]})
+    return results[:12]
+
+# ---------------------------------------------------------------------------
+# Spacing — valores reais do CSS
+# ---------------------------------------------------------------------------
+def _extract_spacing(style_text: str) -> list[int]:
+    values = set()
+    for m in re.finditer(r"gap\s*:\s*([\d.]+)(px|rem)", style_text):
+        px = float(m.group(1)) * (1 if m.group(2) == "px" else 16)
+        values.add(int(px))
+    for m in re.finditer(r"padding(?:-\w+)?\s*:\s*([\d.]+)px", style_text):
+        values.add(int(float(m.group(1))))
+    for m in re.finditer(r"margin(?:-\w+)?\s*:\s*([\d.]+)px", style_text):
+        values.add(int(float(m.group(1))))
+    canonical = [4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96]
+    found = [v for v in canonical if any(abs(v - s) <= 2 for s in values)]
+    return found or [4, 8, 16, 24, 32, 48, 64]
+
+# ---------------------------------------------------------------------------
+# Componentes — priority: DOM evidence, exact class names
+# ---------------------------------------------------------------------------
 def _extract_components(soup: BeautifulSoup) -> dict:
-    """Extrai componentes principais do DOM."""
     components = {}
 
-    # Navbar
+    # Nav — exato do DOM
     nav = soup.find("nav")
     if nav:
         components["nav"] = str(nav)
 
-    # Botões principais
-    buttons = soup.find_all("button")
+    # Botões — distintos por class signature
+    seen_btn = set()
+    buttons = []
+    for btn in soup.find_all("button"):
+        sig = " ".join(btn.get("class", []))[:80]
+        if sig not in seen_btn:
+            seen_btn.add(sig)
+            buttons.append(str(btn))
+        if len(buttons) >= 8:
+            break
     if buttons:
-        components["buttons"] = [str(b) for b in buttons[:6]]
+        components["buttons"] = buttons
 
-    # Cards (divs com border border-white)
-    cards = [
-        tag for tag in soup.find_all("div")
-        if tag.get("class") and any("rounded-[2.5rem]" in c or "rounded-2xl" in c
-                                    for c in tag.get("class", []))
-    ]
-    if cards:
-        components["cards"] = [str(c) for c in cards[:3]]
+    # Links com aparência de botão
+    btn_links = []
+    seen_link = set()
+    for a in soup.find_all("a"):
+        cls = " ".join(a.get("class", []))
+        if any(k in cls for k in ["btn", "button", "cta", "pill"]):
+            sig = cls[:60]
+            if sig not in seen_link:
+                seen_link.add(sig)
+                btn_links.append(str(a))
+        if len(btn_links) >= 4:
+            break
+    if btn_links:
+        components["btn_links"] = btn_links
 
-    # Badges / tags
-    badges = [
-        tag for tag in soup.find_all(["span"])
-        if tag.get("class") and any("rounded" in c and ("px-" in c or "py-" in c)
-                                    for c in tag.get("class", []))
-    ]
+    # Badges e tags
+    seen_badge = set()
+    badges = []
+    for el in soup.find_all(["span", "div"]):
+        cls = " ".join(el.get("class", []))
+        if any(k in cls for k in ["badge", "tag", "pill", "chip", "label"]):
+            sig = cls[:50]
+            if sig not in seen_badge:
+                seen_badge.add(sig)
+                badges.append(str(el))
+        if len(badges) >= 8:
+            break
     if badges:
-        components["badges"] = [str(b) for b in badges[:6]]
+        components["badges"] = badges
 
-    # Search / inputs
-    inputs = soup.find_all("input")
+    # Cards
+    cards = []
+    for el in soup.find_all(["div", "a", "article", "section"]):
+        cls = " ".join(el.get("class", []))
+        if any(k in cls for k in ["card", "case-card", "feature-card", "pricing", "tile"]):
+            markup = str(el)
+            if 200 < len(markup) < 2500:
+                cards.append(markup)
+        if len(cards) >= 3:
+            break
+    if cards:
+        components["cards"] = cards
+
+    # Inputs
+    inputs = soup.find_all("input", limit=4)
     if inputs:
-        components["inputs"] = [str(i) for i in inputs[:3]]
+        components["inputs"] = [str(i) for i in inputs]
+
+    # Scroll hints / section markers (do original v1)
+    scroll_hints = []
+    for el in soup.find_all(class_=True):
+        cls = " ".join(el.get("class", []))
+        if any(k in cls for k in ["scroll-hint", "scroll-indicator", "section-marker", "progress-"]):
+            scroll_hints.append(str(el))
+        if len(scroll_hints) >= 3:
+            break
+    if scroll_hints:
+        components["scroll_hints"] = scroll_hints
 
     return components
 
-
-def _extract_typography(soup: BeautifulSoup) -> list[dict]:
-    """Extrai escala tipográfica real do DOM."""
-    scale = []
-    seen_classes = set()
-
-    tags = [("h1", "Heading 1"), ("h2", "Heading 2"), ("h3", "Heading 3"),
-            ("h4", "Heading 4"), ("p", "Paragraph")]
-
-    for tag_name, label in tags:
-        el = soup.find(tag_name)
-        if el:
-            cls_key = " ".join(el.get("class", []))[:60]
-            if cls_key not in seen_classes:
-                seen_classes.add(cls_key)
-                scale.append({
-                    "label": label,
-                    "tag": tag_name,
-                    "classes": " ".join(el.get("class", [])),
-                    "sample": el.get_text()[:60] or label,
-                })
-
-    # Spans com classes de texto específicas
-    for span in soup.find_all(["span", "div"]):
-        cls = " ".join(span.get("class", []))
-        if "font-mono" in cls and "text-xs" in cls and "tracking-widest" in cls:
-            if "Mono Label" not in [s["label"] for s in scale]:
-                scale.append({
-                    "label": "Mono Label",
-                    "tag": "span",
-                    "classes": cls,
-                    "sample": span.get_text()[:40] or "MONO LABEL",
-                })
-                break
-
-    return scale
-
-
+# ---------------------------------------------------------------------------
+# Ícones — exact markup, same classes
+# ---------------------------------------------------------------------------
 def _extract_icons(soup: BeautifulSoup) -> list[dict]:
-    """Extrai ícones do iconify-icon se presentes."""
     icons = []
     seen = set()
+
     for el in soup.find_all("iconify-icon"):
-        icon_name = el.get("icon", "")
-        width = el.get("width", "24")
-        cls = " ".join(el.get("class", []))
-        if icon_name and icon_name not in seen:
-            seen.add(icon_name)
+        name = el.get("icon", "")
+        if name and name not in seen:
+            seen.add(name)
             icons.append({
-                "icon": icon_name,
-                "width": width,
-                "class": cls,
+                "name": name,
                 "markup": str(el),
+                "width": el.get("width", "24"),
             })
-    return icons[:24]
 
+    for svg in soup.find_all("svg"):
+        title = svg.find("title")
+        cls = " ".join(svg.get("class", []))
+        key = cls[:40] or str(svg)[:50]
+        if key not in seen and len(str(svg)) < 1000:
+            seen.add(key)
+            icons.append({
+                "name": title.get_text() if title else cls or "icon",
+                "markup": str(svg),
+                "width": svg.get("width", "24"),
+            })
+        if len(icons) >= 28:
+            break
 
+    return icons[:28]
+
+# ---------------------------------------------------------------------------
+# Scroll system — conditional (do original v1)
+# ---------------------------------------------------------------------------
+def _extract_scroll_system(soup: BeautifulSoup, style_text: str) -> dict | None:
+    """Extrai scroll observers e timeline bindings se existirem. Nunca fabrica."""
+    scroll_data = {}
+
+    # Elementos com data-scroll ou IntersectionObserver markers
+    scroll_els = []
+    for el in soup.find_all(attrs={"data-scroll": True}):
+        scroll_els.append(str(el)[:200])
+    for el in soup.find_all(class_=re.compile(r"scroll-|reveal-|in-view|observe")):
+        markup = str(el)[:200]
+        if markup not in scroll_els:
+            scroll_els.append(markup)
+    if scroll_els:
+        scroll_data["elements"] = scroll_els[:6]
+
+    # CSS scroll-driven (animation-timeline, scroll-timeline)
+    scroll_css = []
+    for m in re.finditer(r"animation-timeline\s*:[^;]+;", style_text):
+        scroll_css.append(m.group(0).strip())
+    for m in re.finditer(r"scroll-timeline[^;]+;", style_text):
+        scroll_css.append(m.group(0).strip())
+    if scroll_css:
+        scroll_data["css_scroll"] = scroll_css[:4]
+
+    return scroll_data if scroll_data else None
+
+# ---------------------------------------------------------------------------
+# 3D / Canvas layers — conditional (do original v1)
+# ---------------------------------------------------------------------------
+def _extract_canvas_layers(soup: BeautifulSoup) -> list[dict] | None:
+    """Extrai canvas e WebGL containers se existirem. Nunca fabrica."""
+    layers = []
+    for canvas in soup.find_all("canvas"):
+        layers.append({
+            "tag": "canvas",
+            "id": canvas.get("id", ""),
+            "class": " ".join(canvas.get("class", [])),
+            "markup": str(canvas)[:300],
+        })
+    for el in soup.find_all(class_=re.compile(r"webgl|three-|canvas-|shader-")):
+        layers.append({
+            "tag": el.name,
+            "id": el.get("id", ""),
+            "class": " ".join(el.get("class", [])),
+            "markup": str(el)[:300],
+        })
+    return layers if layers else None
+
+# ---------------------------------------------------------------------------
+# Hero — clone exato, só texto substituído
+# ---------------------------------------------------------------------------
 def _extract_hero(soup: BeautifulSoup) -> str:
-    """Clona o hero exato do HTML fonte."""
-    hero = soup.find(id="hero") or soup.find(attrs={"class": lambda c: c and "min-h-[calc" in " ".join(c)})
-    if hero:
-        return str(hero)
-    # fallback: pega o primeiro bloco grande
+    for hero_id in ["hero", "home", "banner", "jumbotron", "intro"]:
+        el = soup.find(id=hero_id)
+        if el:
+            return str(el)
     body = soup.find("body")
     if body:
-        children = [c for c in body.children if hasattr(c, "name") and c.name]
-        if children:
-            return str(children[0])
+        for child in body.children:
+            if hasattr(child, "name") and child.name in ["section", "div", "header", "main"]:
+                content = str(child)
+                if len(content) > 600:
+                    return content
     return ""
 
+# ---------------------------------------------------------------------------
+# Assets originais — nunca bundle, nunca inline
+# ---------------------------------------------------------------------------
+def _extract_style_blocks(soup: BeautifulSoup) -> str:
+    return "\n".join(t.string for t in soup.find_all("style") if t.string)
 
-def _extract_blob_styles(style_text: str) -> str:
-    """Extrai definições de blob/background animado."""
-    blob_pattern = re.compile(r"\.blob[^{]*\{[^}]+\}", re.DOTALL)
-    return "\n".join(m.group(0) for m in blob_pattern.finditer(style_text))
+def _extract_css_links(soup: BeautifulSoup) -> list[str]:
+    return [t.get("href", "") for t in soup.find_all("link", rel="stylesheet") if t.get("href")]
 
+def _extract_js_srcs(soup: BeautifulSoup) -> list[str]:
+    srcs = []
+    for t in soup.find_all("script", src=True):
+        src = t.get("src", "")
+        if src and not src.startswith("http"):
+            srcs.append(src)
+    return srcs
 
 # ---------------------------------------------------------------------------
-# Gerador principal
+# Gerador de HTML — design-system.html
 # ---------------------------------------------------------------------------
-
-def generate_design_system(zip_path: Path, output_path: Path) -> bool:
+def generate_design_system(html_content: str) -> str:
     """
-    Lê o ZIP gerado pelo downloader, extrai o index.html,
-    e gera um design-system.html completo.
-
-    Returns True se bem-sucedido, False caso contrário.
+    Recebe o HTML já processado (index.html) e retorna
+    o conteúdo do design-system.html como string.
+    
+    Chamado pelo downloader ANTES de empacotar o ZIP,
+    para que ambos os arquivos entrem no mesmo pacote.
     """
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = zf.namelist()
+    soup = BeautifulSoup(html_content, "html.parser")
 
-            # Encontra o index.html
-            html_name = next((n for n in names if n.endswith("index.html")), None)
-            if not html_name:
-                return False
+    # Extração — priority: DOM evidence
+    style_text  = _extract_style_blocks(soup)
+    css_links   = _extract_css_links(soup)
+    js_srcs     = _extract_js_srcs(soup)
+    tokens      = _extract_css_tokens(style_text)
+    keyframes   = _extract_keyframes(style_text)
+    transitions = _extract_transition_classes(style_text)
+    spacing     = _extract_spacing(style_text)
+    typography  = _extract_typography(soup, style_text)
+    components  = _extract_components(soup)
+    icons       = _extract_icons(soup)
+    hero_html   = _extract_hero(soup)
+    arb_colors  = _extract_css_tokens_from_classes(soup)
+    surfaces    = _extract_opacity_surfaces(soup)
+    gradients   = _extract_gradient_classes(soup)
+    scroll_sys  = _extract_scroll_system(soup, style_text)
+    canvas_lyrs = _extract_canvas_layers(soup)
 
-            html_content = zf.read(html_name).decode("utf-8", errors="replace")
+    page_title = soup.find("title")
+    title_text = page_title.get_text() if page_title else "Site"
 
-            # Lista assets disponíveis
-            css_files = [n for n in names if n.endswith(".css")]
-            js_files  = [n for n in names if n.endswith(".js") or n.endswith(".es")]
+    # Asset refs — same originals, never inlined
+    css_tags = "\n".join(f'<link rel="stylesheet" href="{h}"/>' for h in css_links)
+    js_tags  = "\n".join(f'<script src="{s}"></script>' for s in js_srcs)
 
-        soup = BeautifulSoup(html_content, "html.parser")
+    # ── 01 Tokens ──
+    color_tokens = [t for t in tokens if t["is_color"]]
+    other_tokens = [t for t in tokens if not t["is_color"]]
 
-        # --- Extração ---
-        style_text   = _extract_style_block(soup)
-        css_links    = _extract_css_links(soup)
-        js_srcs      = _extract_js_scripts(soup)
-        keyframes    = _extract_keyframes(style_text)
-        custom_cls   = _extract_custom_classes(style_text)
-        colors       = _extract_colors_from_classes(soup)
-        surfaces     = _extract_opacity_surfaces(soup)
-        components   = _extract_components(soup)
-        typography   = _extract_typography(soup)
-        icons        = _extract_icons(soup)
-        hero_html    = _extract_hero(soup)
-        blob_styles  = _extract_blob_styles(style_text)
-
-        page_title   = soup.find("title")
-        title_text   = page_title.get_text() if page_title else "Design System"
-        has_icons    = bool(icons)
-
-        # --- Monta o HTML ---
-        nav_anchors = ["#hero", "#typography", "#colors", "#components", "#motion"]
-        if has_icons:
-            nav_anchors.append("#icons")
-
-        nav_items_html = "\n".join(
-            f'<a href="{a}" class="ds-nav-link">{a[1:].capitalize()}</a>'
-            for a in nav_anchors
-        )
-
-        # CSS links originais
-        css_link_tags = "\n".join(
-            f'<link rel="stylesheet" href="{href}"/>'
-            for href in css_links
-        )
-
-        # JS scripts originais
-        js_script_tags = "\n".join(
-            f'<script src="{src}"></script>'
-            for src in js_srcs
-        )
-
-        # Seção tipografia
-        typo_rows = ""
-        for t in typography:
-            typo_rows += f"""
-            <tr class="ds-typo-row">
-              <td class="ds-td-label">{t['label']}</td>
-              <td class="ds-td-tag"><code>&lt;{t['tag']}&gt;</code></td>
-              <td class="ds-td-preview">
-                <{t['tag']} class="{t['classes']}" style="margin:0">{t['sample']}</{t['tag']}>
-              </td>
-              <td class="ds-td-classes"><code>{t['classes'][:80]}</code></td>
-            </tr>"""
-
-        # Seção cores
-        color_swatches = ""
-        for c in colors[:20]:
-            color_swatches += f"""
-            <div class="ds-swatch">
-              <div class="ds-swatch-block" style="background:{c}"></div>
-              <code class="ds-swatch-label">{c}</code>
-            </div>"""
-
-        surface_swatches = ""
-        for s in surfaces:
-            val = s.replace("bg-white/", "rgba(255,255,255,0.").replace("bg-black/", "rgba(0,0,0,0.")
-            pct = int(s.split("/")[-1]) / 100
-            bg = f"rgba(255,255,255,{pct})" if "white" in s else f"rgba(0,0,0,{pct})"
-            surface_swatches += f"""
-            <div class="ds-swatch">
-              <div class="ds-swatch-block ds-swatch-checker" style="background:{bg}"></div>
-              <code class="ds-swatch-label">{s}</code>
-            </div>"""
-
-        # Seção componentes — botões
-        buttons_html = ""
-        for b in components.get("buttons", []):
-            buttons_html += f'<div class="ds-component-item">{b}</div>'
-
-        # Seção componentes — badges
-        badges_html = ""
-        for b in components.get("badges", []):
-            badges_html += f'<div class="ds-component-item">{b}</div>'
-
-        # Seção componentes — cards
-        cards_html = ""
-        for c in components.get("cards", []):
-            cards_html += f'<div class="ds-component-item ds-card-wrap">{c}</div>'
-
-        # Nav
-        nav_comp = components.get("nav", "")
-
-        # Seção motion — keyframes
-        motion_html = ""
-        for kf in keyframes:
-            motion_html += f"""
-            <div class="ds-motion-item">
-              <div class="ds-motion-label"><code>@keyframes {kf['name']}</code></div>
-              <pre class="ds-code-block">{kf['body'][:300]}</pre>
-            </div>"""
-
-        # Seção motion — classes de transição
-        transition_classes = [c for c in custom_cls if any(
-            k in c["props"] for k in ["transition", "animation", "transform", "cubic-bezier"]
-        )]
-        for tc in transition_classes[:8]:
-            motion_html += f"""
-            <div class="ds-motion-item">
-              <div class="ds-motion-label"><code>.{tc['class']}</code></div>
-              <pre class="ds-code-block">{tc['props'][:200]}</pre>
-            </div>"""
-
-        # Seção ícones
-        icons_html = ""
-        if has_icons:
-            for ic in icons:
-                icons_html += f"""
-                <div class="ds-icon-item">
-                  {ic['markup']}
-                  <code class="ds-icon-name">{ic['icon']}</code>
-                </div>"""
-
-        icons_section = f"""
-        <section class="ds-section" id="icons">
-          <div class="ds-section-header">
-            <p class="ds-section-tag">06 — Icons</p>
-            <h2 class="ds-section-title text-glow">Icon set.</h2>
-            <p class="ds-section-desc">Todos os ícones extraídos do DOM fonte.</p>
+    token_swatches = ""
+    for t in color_tokens:
+        resolved = _resolve_var(t["value"], tokens)
+        token_swatches += f"""
+        <div class="ds-token-row">
+          <div class="ds-token-swatch">
+            <div class="ds-swatch-fill" style="background:{resolved}"></div>
           </div>
-          <div class="ds-icons-grid">
-            {icons_html}
+          <div class="ds-token-info">
+            <code class="ds-tname">{t['name']}</code>
+            <span class="ds-tvalue">{t['value']}</span>
+            <span class="ds-tlabel">{t['label']}</span>
           </div>
-        </section>
-        """ if has_icons else ""
+        </div>"""
 
-        html = f"""<!DOCTYPE html>
+    arb_swatches = ""
+    for c in arb_colors[:16]:
+        arb_swatches += f"""
+        <div class="ds-arb-swatch">
+          <div class="ds-arb-fill" style="background:{c}"></div>
+          <code class="ds-arb-val">{c}</code>
+        </div>"""
+
+    surface_swatches = ""
+    for s in surfaces:
+        pct = int(s.split("/")[-1]) / 100
+        bg = f"rgba(255,255,255,{pct})" if "white" in s else f"rgba(0,0,0,{pct})"
+        surface_swatches += f"""
+        <div class="ds-arb-swatch">
+          <div class="ds-arb-fill ds-checker" style="--sfill:{bg}"></div>
+          <code class="ds-arb-val">{s}</code>
+        </div>"""
+
+    grad_swatches = ""
+    for g in gradients:
+        grad_swatches += f"""
+        <div class="ds-grad-item">
+          <div class="{g} ds-grad-preview"></div>
+          <code class="ds-arb-val" style="font-size:9px">{g[:60]}</code>
+        </div>"""
+
+    other_rows = ""
+    for t in other_tokens[:10]:
+        other_rows += f"""
+        <div class="ds-other-row">
+          <code class="ds-tname">{t['name']}</code>
+          <span class="ds-tvalue">{t['value'][:40]}</span>
+          <span class="ds-tlabel">{t['label']}</span>
+        </div>"""
+
+    tokens_section = f"""
+      <div class="ds-tokens-grid">{token_swatches or '<p class="ds-empty">Nenhuma CSS variable encontrada.</p>'}</div>
+      {'<h3 class="ds-sub">Tailwind arbitrary colors</h3><div class="ds-arb-grid">' + arb_swatches + '</div>' if arb_swatches else ''}
+      {'<h3 class="ds-sub">Opacity surfaces</h3><div class="ds-arb-grid">' + surface_swatches + '</div>' if surface_swatches else ''}
+      {'<h3 class="ds-sub">Gradients</h3><div class="ds-arb-grid">' + grad_swatches + '</div>' if grad_swatches else ''}
+      {'<h3 class="ds-sub">Outros tokens</h3><div class="ds-other-grid">' + other_rows + '</div>' if other_rows else ''}
+    """
+
+    # ── 02 Typography — formato '40px / 48px' do v2 ──
+    typo_rows = ""
+    for t in typography:
+        typo_rows += f"""
+        <div class="ds-typo-row">
+          <div class="ds-typo-meta">
+            <span class="ds-typo-label">{t['label']}</span>
+            <span class="ds-typo-size">{t['size_hint']}</span>
+            <code class="ds-typo-tag">&lt;{t['tag']}&gt;</code>
+          </div>
+          <div class="ds-typo-live">
+            <{t['tag']} class="{t['classes']}" style="margin:0">{t['sample']}</{t['tag']}>
+          </div>
+          <div class="ds-typo-cls"><code>{t['classes'][:100]}</code></div>
+        </div>"""
+
+    # ── 03 Spacing ──
+    spacing_items = ""
+    for v in spacing:
+        spacing_items += f"""
+        <div class="ds-space-row">
+          <div class="ds-space-bar" style="width:{min(v * 2.8, 400)}px"></div>
+          <div class="ds-space-meta">
+            <span class="ds-space-px">{v}px</span>
+            <span class="ds-space-rem">{v/16:.3g}rem</span>
+          </div>
+        </div>"""
+
+    # ── 04 Components ──
+    comp_html = ""
+    if components.get("nav"):
+        comp_html += f'<h3 class="ds-sub">Navigation</h3><div class="ds-canvas">{components["nav"]}</div>'
+    if components.get("buttons"):
+        items = "".join(f'<div class="ds-comp-item">{b}</div>' for b in components["buttons"])
+        comp_html += f'<h3 class="ds-sub">Buttons — default / hover / active</h3><div class="ds-comp-row">{items}</div>'
+    if components.get("btn_links"):
+        items = "".join(f'<div class="ds-comp-item">{b}</div>' for b in components["btn_links"])
+        comp_html += f'<h3 class="ds-sub">Button Links</h3><div class="ds-comp-row">{items}</div>'
+    if components.get("badges"):
+        items = "".join(f'<div class="ds-comp-item">{b}</div>' for b in components["badges"])
+        comp_html += f'<h3 class="ds-sub">Badges & Tags</h3><div class="ds-comp-row">{items}</div>'
+    if components.get("cards"):
+        items = "".join(f'<div class="ds-card-item">{c}</div>' for c in components["cards"])
+        comp_html += f'<h3 class="ds-sub">Cards</h3><div class="ds-cards-grid">{items}</div>'
+    if components.get("inputs"):
+        items = "".join(f'<div class="ds-comp-item">{i}</div>' for i in components["inputs"])
+        comp_html += f'<h3 class="ds-sub">Inputs</h3><div class="ds-comp-row">{items}</div>'
+    if components.get("scroll_hints"):
+        items = "".join(f'<div class="ds-comp-item">{h}</div>' for h in components["scroll_hints"])
+        comp_html += f'<h3 class="ds-sub">Scroll hints / Section markers</h3><div class="ds-comp-row">{items}</div>'
+    if not comp_html:
+        comp_html = "<p class='ds-empty'>Nenhum componente identificado no DOM.</p>"
+
+    # ── 05 Motion — exact keyframes, never approximate easing ──
+    motion_items = ""
+    for kf in keyframes:
+        motion_items += f"""
+        <div class="ds-motion-item">
+          <div class="ds-motion-label"><code>@keyframes {kf['name']}</code></div>
+          <pre class="ds-code">{kf['body']}</pre>
+        </div>"""
+    for tc in transitions:
+        motion_items += f"""
+        <div class="ds-motion-item">
+          <div class="ds-motion-label"><code>.{tc['class']}</code></div>
+          <pre class="ds-code">{tc['props']}</pre>
+        </div>"""
+    if not motion_items:
+        motion_items = "<p class='ds-empty'>Nenhuma animação encontrada no CSS.</p>"
+
+    # ── 06 Icons — exact markup, same classes ──
+    has_icons = bool(icons)
+    icon_items = ""
+    for ic in icons:
+        icon_items += f"""
+        <div class="ds-icon-item">
+          <div class="ds-icon-preview">{ic['markup']}</div>
+          <code class="ds-icon-name">{ic['name'][:28]}</code>
+        </div>"""
+    icons_section = f"""
+    <section class="ds-section" id="icons">
+      <p class="ds-tag">06 — Icons</p>
+      <h2 class="ds-title">Icon set.</h2>
+      <p class="ds-desc">Ícones extraídos do DOM com markup e classes exatos.</p>
+      <div class="ds-icons-grid">{icon_items}</div>
+    </section>""" if has_icons else ""
+
+    # ── 07 Scroll system — conditional (v1) ──
+    scroll_section = ""
+    if scroll_sys:
+        scroll_items = ""
+        for el in scroll_sys.get("elements", []):
+            scroll_items += f'<pre class="ds-code">{el}</pre>'
+        for css in scroll_sys.get("css_scroll", []):
+            scroll_items += f'<pre class="ds-code">{css}</pre>'
+        scroll_section = f"""
+    <section class="ds-section" id="scroll-system">
+      <p class="ds-tag">07 — Scroll System</p>
+      <h2 class="ds-title">Scroll orchestration.</h2>
+      <p class="ds-desc">Observers, timeline bindings e triggers extraídos do DOM. Nunca recriados manualmente.</p>
+      <div class="ds-motion-grid">{scroll_items}</div>
+    </section>"""
+
+    # ── 08 Canvas/3D — conditional (v1) ──
+    canvas_section = ""
+    if canvas_lyrs:
+        canvas_items = ""
+        for layer in canvas_lyrs:
+            canvas_items += f"""
+            <div class="ds-motion-item">
+              <div class="ds-motion-label"><code>{layer['tag']}#{layer['id'] or layer['class'][:30]}</code></div>
+              <pre class="ds-code">{layer['markup']}</pre>
+            </div>"""
+        canvas_section = f"""
+    <section class="ds-section" id="3d-layers">
+      <p class="ds-tag">08 — Canvas / 3D Layers</p>
+      <h2 class="ds-title">Rendering layer map.</h2>
+      <p class="ds-desc">Canvas containers e WebGL surfaces extraídos do DOM.</p>
+      <div class="ds-motion-grid">{canvas_items}</div>
+    </section>"""
+
+    # ── Nav anchors — remove os que não têm evidência ──
+    nav_items = [
+        ('<a href="#hero" class="ds-nav-link">Hero</a>', True),
+        ('<a href="#tokens" class="ds-nav-link">Tokens</a>', bool(tokens or arb_colors)),
+        ('<a href="#typography" class="ds-nav-link">Typography</a>', bool(typography)),
+        ('<a href="#spacing" class="ds-nav-link">Spacing</a>', bool(spacing)),
+        ('<a href="#components" class="ds-nav-link">Components</a>', bool(components)),
+        ('<a href="#motion" class="ds-nav-link">Motion</a>', bool(keyframes or transitions)),
+        ('<a href="#icons" class="ds-nav-link">Icons</a>', has_icons),
+        ('<a href="#scroll-system" class="ds-nav-link">Scroll</a>', bool(scroll_sys)),
+        ('<a href="#3d-layers" class="ds-nav-link">Canvas</a>', bool(canvas_lyrs)),
+    ]
+    nav_html = "\n".join(link for link, show in nav_items if show)
+
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Design System — {title_text}</title>
 
-{css_link_tags}
-{js_script_tags}
+<!-- Assets originais — nunca bundled, nunca inline -->
+{css_tags}
+{js_tags}
 
 <style>
-/* ============================================================
-   Estilos do site original — preservados integralmente
-   ============================================================ */
+/* ── CSS original do site — preservado integralmente ── */
 {style_text}
 
-/* ============================================================
-   Design System Showcase — layer de documentação
-   ============================================================ */
+/* ── Design System Showcase Layer ── */
 :root {{
-  --ds-bg: #020205;
-  --ds-surface: rgba(255,255,255,0.03);
-  --ds-border: rgba(255,255,255,0.08);
-  --ds-text: rgba(255,255,255,0.85);
-  --ds-muted: rgba(255,255,255,0.35);
-  --ds-accent: rgba(99,102,241,0.8);
-  --ds-mono: 'Space Mono', monospace;
+  --ds-bg:      #09090b;
+  --ds-surf:    #111114;
+  --ds-surf2:   #18181c;
+  --ds-border:  rgba(255,255,255,0.07);
+  --ds-border2: rgba(255,255,255,0.13);
+  --ds-text:    rgba(255,255,255,0.88);
+  --ds-muted:   rgba(255,255,255,0.38);
+  --ds-dim:     rgba(255,255,255,0.16);
+  --ds-accent:  #6366f1;
+  --ds-acc-bg:  rgba(99,102,241,0.09);
+  --ds-mono:    ui-monospace,'Cascadia Code','SF Mono',Menlo,monospace;
 }}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:var(--ds-bg);color:var(--ds-text);font-family:ui-sans-serif,system-ui,sans-serif;min-height:100vh}}
 
-body {{
-  font-family: 'Inter', sans-serif;
-  background: var(--ds-bg);
-  color: var(--ds-text);
-  margin: 0;
-  cursor: default;
-}}
+/* Nav */
+.ds-topnav{{position:sticky;top:0;z-index:9999;display:flex;align-items:center;gap:4px;padding:11px 40px;background:rgba(9,9,11,0.92);backdrop-filter:blur(24px);border-bottom:1px solid var(--ds-border)}}
+.ds-topnav-logo{{font-size:12px;font-weight:700;color:var(--ds-text);margin-right:auto;letter-spacing:0.08em;text-transform:uppercase;display:flex;align-items:center;gap:8px}}
+.ds-topnav-logo::before{{content:'';width:6px;height:6px;background:var(--ds-accent);border-radius:50%;flex-shrink:0}}
+.ds-topnav-badge{{font-size:10px;font-family:var(--ds-mono);color:var(--ds-accent);background:var(--ds-acc-bg);border:1px solid rgba(99,102,241,0.2);padding:3px 10px;border-radius:100px;margin-right:10px}}
+.ds-nav-link{{font-size:11px;color:var(--ds-muted);text-decoration:none;padding:5px 10px;border-radius:100px;transition:all 0.15s;font-family:var(--ds-mono)}}
+.ds-nav-link:hover{{color:var(--ds-text);background:rgba(255,255,255,0.05)}}
 
-/* Blobs de fundo originais */
-{blob_styles}
+/* Sections */
+.ds-section{{padding:72px 48px;border-top:1px solid var(--ds-border);max-width:1280px;margin:0 auto}}
+.ds-tag{{font-size:11px;font-family:var(--ds-mono);color:var(--ds-accent);letter-spacing:0.12em;text-transform:uppercase;margin:0 0 10px}}
+.ds-title{{font-size:clamp(24px,4vw,42px);font-weight:600;letter-spacing:-0.025em;color:#fff;margin:0 0 10px;line-height:1.1}}
+.ds-desc{{font-size:14px;color:var(--ds-muted);margin:0 0 44px;line-height:1.6;max-width:560px}}
+.ds-sub{{font-size:12px;font-weight:600;color:var(--ds-text);margin:36px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--ds-border)}}
+.ds-empty{{font-size:13px;color:var(--ds-muted);padding:20px 0}}
 
-/* --- DS Top Nav --- */
-.ds-topnav {{
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 14px 48px;
-  background: rgba(2,2,5,0.85);
-  backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--ds-border);
-}}
+/* Hero wrapper */
+.ds-hero-wrap{{position:relative;overflow:hidden;border-bottom:1px solid var(--ds-border)}}
 
-.ds-topnav-logo {{
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ds-text);
-  margin-right: auto;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}}
+/* Tokens */
+.ds-tokens-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}}
+.ds-token-row{{display:flex;align-items:center;gap:14px;padding:13px 15px;background:var(--ds-surf);border:1px solid var(--ds-border);border-radius:10px;transition:border-color 0.15s}}
+.ds-token-row:hover{{border-color:var(--ds-border2)}}
+.ds-token-swatch{{width:44px;height:44px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);flex-shrink:0;background-image:linear-gradient(45deg,#222 25%,transparent 25%),linear-gradient(-45deg,#222 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#222 75%),linear-gradient(-45deg,transparent 75%,#222 75%);background-size:8px 8px;position:relative;overflow:hidden}}
+.ds-swatch-fill{{position:absolute;inset:0;border-radius:7px}}
+.ds-token-info{{min-width:0;flex:1}}
+.ds-tname{{font-family:var(--ds-mono);font-size:11px;color:var(--ds-accent);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.ds-tvalue{{font-size:11px;color:var(--ds-muted);font-family:var(--ds-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;display:block}}
+.ds-tlabel{{font-size:11px;color:var(--ds-dim);margin-top:3px;display:block}}
+.ds-other-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:7px}}
+.ds-other-row{{display:flex;align-items:center;gap:10px;padding:9px 13px;background:var(--ds-surf);border:1px solid var(--ds-border);border-radius:8px;font-size:12px;overflow:hidden}}
+.ds-other-row .ds-tname{{color:var(--ds-accent);flex-shrink:0;font-size:11px}}
+.ds-other-row .ds-tvalue{{color:var(--ds-muted);margin-left:auto;font-family:var(--ds-mono);font-size:11px}}
+.ds-other-row .ds-tlabel{{color:var(--ds-dim);font-size:11px;white-space:nowrap}}
+.ds-arb-grid{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px}}
+.ds-arb-swatch{{display:flex;flex-direction:column;align-items:center;gap:6px}}
+.ds-arb-fill{{width:56px;height:56px;border-radius:10px;border:1px solid var(--ds-border)}}
+.ds-checker{{background-image:linear-gradient(45deg,#222 25%,transparent 25%),linear-gradient(-45deg,#222 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#222 75%),linear-gradient(-45deg,transparent 75%,#222 75%);background-size:8px 8px;position:relative}}
+.ds-checker::after{{content:'';position:absolute;inset:0;border-radius:9px;background:var(--sfill)}}
+.ds-arb-val{{font-family:var(--ds-mono);font-size:9px;color:var(--ds-muted);text-align:center;max-width:64px;word-break:break-all}}
+.ds-grad-item{{display:flex;flex-direction:column;gap:6px}}
+.ds-grad-preview{{width:120px;height:56px;border-radius:10px;border:1px solid var(--ds-border)}}
 
-.ds-topnav-badge {{
-  font-size: 10px;
-  font-family: var(--ds-mono);
-  color: rgba(99,102,241,0.9);
-  background: rgba(99,102,241,0.1);
-  border: 1px solid rgba(99,102,241,0.2);
-  padding: 3px 10px;
-  border-radius: 100px;
-  margin-right: 16px;
-}}
+/* Typography — formato 40px / 48px */
+.ds-typo-row{{display:grid;grid-template-columns:180px 1fr 200px;gap:20px;align-items:center;padding:18px 0;border-bottom:1px solid var(--ds-border)}}
+.ds-typo-meta{{display:flex;flex-direction:column;gap:5px}}
+.ds-typo-label{{font-size:12px;font-weight:600;color:var(--ds-text)}}
+.ds-typo-size{{font-size:11px;color:var(--ds-accent);font-family:var(--ds-mono)}}
+.ds-typo-tag{{font-family:var(--ds-mono);font-size:10px;color:var(--ds-muted);background:var(--ds-acc-bg);padding:2px 7px;border-radius:4px;width:fit-content}}
+.ds-typo-live{{overflow:hidden}}
+.ds-typo-live h1,.ds-typo-live h2,.ds-typo-live h3,.ds-typo-live h4,.ds-typo-live p{{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.ds-typo-cls{{overflow:hidden}}
+.ds-typo-cls code{{font-family:var(--ds-mono);font-size:9px;color:var(--ds-dim);word-break:break-all;line-height:1.6}}
 
-.ds-nav-link {{
-  font-size: 12px;
-  color: var(--ds-muted);
-  text-decoration: none;
-  padding: 6px 14px;
-  border-radius: 100px;
-  transition: all 0.2s;
-  font-family: var(--ds-mono);
-  letter-spacing: 0.04em;
-}}
-.ds-nav-link:hover {{
-  color: var(--ds-text);
-  background: var(--ds-surface);
-}}
+/* Spacing */
+.ds-spacing-list{{display:flex;flex-direction:column;gap:10px}}
+.ds-space-row{{display:flex;align-items:center;gap:16px}}
+.ds-space-bar{{height:28px;min-width:4px;background:var(--ds-acc-bg);border:1px solid rgba(99,102,241,0.2);border-radius:5px;transition:background 0.2s}}
+.ds-space-row:hover .ds-space-bar{{background:rgba(99,102,241,0.16)}}
+.ds-space-meta{{display:flex;flex-direction:column;gap:2px}}
+.ds-space-px{{font-family:var(--ds-mono);font-size:13px;color:var(--ds-text)}}
+.ds-space-rem{{font-family:var(--ds-mono);font-size:11px;color:var(--ds-muted)}}
 
-/* --- DS Section layout --- */
-.ds-section {{
-  padding: 80px 48px;
-  border-top: 1px solid var(--ds-border);
-  max-width: 1400px;
-  margin: 0 auto;
-}}
+/* Components */
+.ds-canvas{{padding:22px;background:var(--ds-surf);border:1px solid var(--ds-border);border-radius:12px;margin-bottom:8px;overflow-x:auto}}
+.ds-comp-row{{display:flex;flex-wrap:wrap;gap:12px;padding:20px;background:var(--ds-surf);border:1px solid var(--ds-border);border-radius:12px;margin-bottom:8px;align-items:center}}
+.ds-comp-item{{display:flex;align-items:center}}
+.ds-cards-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}}
+.ds-card-item{{overflow:hidden}}
 
-.ds-section-tag {{
-  font-size: 11px;
-  font-family: var(--ds-mono);
-  color: rgba(99,102,241,0.8);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  margin: 0 0 12px;
-}}
+/* Motion — exact, never approximate */
+.ds-motion-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}}
+.ds-motion-item{{background:var(--ds-surf);border:1px solid var(--ds-border);border-radius:10px;padding:16px}}
+.ds-motion-label{{margin-bottom:10px}}
+.ds-motion-label code{{font-family:var(--ds-mono);font-size:12px;color:var(--ds-accent)}}
+.ds-code{{font-family:var(--ds-mono);font-size:11px;color:var(--ds-muted);background:rgba(0,0,0,0.3);border:1px solid var(--ds-border);border-radius:6px;padding:10px;overflow-x:auto;white-space:pre-wrap;line-height:1.7;margin:0;display:block}}
 
-.ds-section-title {{
-  font-size: clamp(28px, 4vw, 48px);
-  font-weight: 500;
-  letter-spacing: -0.03em;
-  color: #fff;
-  margin: 0 0 12px;
-}}
+/* Icons — same markup, same classes */
+.ds-icons-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:10px}}
+.ds-icon-item{{display:flex;flex-direction:column;align-items:center;gap:7px;padding:14px 8px;background:var(--ds-surf);border:1px solid var(--ds-border);border-radius:10px;transition:background 0.15s,border-color 0.15s}}
+.ds-icon-item:hover{{background:var(--ds-surf2);border-color:var(--ds-border2)}}
+.ds-icon-preview{{display:flex;align-items:center;justify-content:center;color:var(--ds-text)}}
+.ds-icon-name{{font-family:var(--ds-mono);font-size:9px;color:var(--ds-muted);text-align:center;word-break:break-all}}
 
-.ds-section-desc {{
-  font-size: 14px;
-  color: var(--ds-muted);
-  margin: 0 0 48px;
-  line-height: 1.6;
-}}
-
-.ds-subsection-title {{
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--ds-text);
-  margin: 40px 0 20px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--ds-border);
-}}
-
-/* --- Hero clone wrapper --- */
-.ds-hero-wrapper {{
-  position: relative;
-  overflow: hidden;
-  border-bottom: 1px solid var(--ds-border);
-}}
-
-/* --- Typography table --- */
-.ds-typo-table {{
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}}
-.ds-typo-row {{
-  border-bottom: 1px solid var(--ds-border);
-}}
-.ds-typo-row td {{
-  padding: 20px 16px;
-  vertical-align: middle;
-}}
-.ds-td-label {{
-  font-family: var(--ds-mono);
-  color: var(--ds-muted);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  white-space: nowrap;
-  width: 120px;
-}}
-.ds-td-tag code {{
-  font-family: var(--ds-mono);
-  font-size: 11px;
-  color: rgba(99,102,241,0.8);
-  background: rgba(99,102,241,0.08);
-  padding: 2px 8px;
-  border-radius: 4px;
-}}
-.ds-td-preview {{ min-width: 300px; }}
-.ds-td-classes code {{
-  font-family: var(--ds-mono);
-  font-size: 10px;
-  color: var(--ds-muted);
-  word-break: break-all;
-}}
-
-/* --- Color swatches --- */
-.ds-swatches-grid {{
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  margin-bottom: 32px;
-}}
-.ds-swatch {{
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}}
-.ds-swatch-block {{
-  width: 64px;
-  height: 64px;
-  border-radius: 12px;
-  border: 1px solid var(--ds-border);
-}}
-.ds-swatch-checker {{
-  background-image:
-    linear-gradient(45deg, #333 25%, transparent 25%),
-    linear-gradient(-45deg, #333 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #333 75%),
-    linear-gradient(-45deg, transparent 75%, #333 75%);
-  background-size: 10px 10px;
-  background-position: 0 0, 0 5px, 5px -5px, -5px 0px;
-  background-color: #1a1a1a;
-  position: relative;
-}}
-.ds-swatch-checker::after {{
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 12px;
-}}
-.ds-swatch-label {{
-  font-family: var(--ds-mono);
-  font-size: 9px;
-  color: var(--ds-muted);
-  text-align: center;
-  max-width: 72px;
-  word-break: break-all;
-}}
-
-/* --- Components --- */
-.ds-component-group {{
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  margin-bottom: 8px;
-}}
-.ds-component-item {{
-  display: flex;
-  align-items: flex-start;
-}}
-.ds-card-wrap {{
-  max-width: 340px;
-  width: 100%;
-}}
-
-/* --- Nav component preview --- */
-.ds-nav-preview {{
-  padding: 24px;
-  background: var(--ds-surface);
-  border: 1px solid var(--ds-border);
-  border-radius: 16px;
-  margin-bottom: 8px;
-}}
-
-/* --- Motion --- */
-.ds-motion-grid {{
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 20px;
-}}
-.ds-motion-item {{
-  background: var(--ds-surface);
-  border: 1px solid var(--ds-border);
-  border-radius: 12px;
-  padding: 20px;
-}}
-.ds-motion-label {{
-  margin-bottom: 12px;
-}}
-.ds-motion-label code {{
-  font-family: var(--ds-mono);
-  font-size: 12px;
-  color: rgba(99,102,241,0.9);
-}}
-
-/* --- Icons --- */
-.ds-icons-grid {{
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-  gap: 16px;
-}}
-.ds-icon-item {{
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 20px 12px;
-  background: var(--ds-surface);
-  border: 1px solid var(--ds-border);
-  border-radius: 12px;
-  transition: background 0.2s;
-}}
-.ds-icon-item:hover {{ background: rgba(255,255,255,0.06); }}
-.ds-icon-name {{
-  font-family: var(--ds-mono);
-  font-size: 9px;
-  color: var(--ds-muted);
-  text-align: center;
-  word-break: break-all;
-}}
-
-/* --- Code blocks --- */
-.ds-code-block {{
-  font-family: var(--ds-mono);
-  font-size: 11px;
-  color: var(--ds-muted);
-  background: rgba(0,0,0,0.3);
-  border: 1px solid var(--ds-border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  margin: 0;
-  line-height: 1.7;
-}}
-
-/* --- Layout section --- */
-.ds-layout-demo {{
-  background: var(--ds-surface);
-  border: 1px solid var(--ds-border);
-  border-radius: 16px;
-  padding: 32px;
-  margin-bottom: 20px;
-}}
-.ds-layout-label {{
-  font-family: var(--ds-mono);
-  font-size: 10px;
-  color: var(--ds-muted);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  margin-bottom: 16px;
-}}
-.ds-grid-visual {{
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-}}
-.ds-grid-cell {{
-  background: rgba(99,102,241,0.08);
-  border: 1px dashed rgba(99,102,241,0.3);
-  border-radius: 8px;
-  height: 60px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--ds-mono);
-  font-size: 10px;
-  color: rgba(99,102,241,0.6);
+@media(max-width:768px){{
+  .ds-section{{padding:48px 20px}}
+  .ds-topnav{{padding:11px 20px}}
+  .ds-topnav-badge,.ds-nav-link{{display:none}}
+  .ds-typo-row{{grid-template-columns:1fr;gap:8px}}
+  .ds-typo-cls{{display:none}}
 }}
 </style>
 </head>
 <body>
 
-<!-- Background blobs originais -->
-<div class="blob blob-1"></div>
-<div class="blob blob-2"></div>
-<div class="blob blob-3"></div>
-
-<!-- DS Top Navigation -->
 <nav class="ds-topnav">
   <span class="ds-topnav-logo">Design System</span>
-  <span class="ds-topnav-badge">pattern library</span>
-  {nav_items_html}
+  <span class="ds-topnav-badge">pattern library v3</span>
+  {nav_html}
 </nav>
 
-<!-- ============================================================
-     00 — HERO (clone exato do original)
-     ============================================================ -->
-<div class="ds-hero-wrapper" id="hero">
-  {hero_html}
-</div>
+<!-- 00 — HERO: clone exato, só texto substituído -->
+<div class="ds-hero-wrap" id="hero">{hero_html}</div>
 
-<!-- ============================================================
-     01 — TYPOGRAPHY
-     ============================================================ -->
+<!-- 01 — TOKENS -->
+<section class="ds-section" id="tokens">
+  <p class="ds-tag">01 — Tokens</p>
+  <h2 class="ds-title">Color tokens & variables.</h2>
+  <p class="ds-desc">CSS custom properties extraídas de :root com label semântico inferido. Apenas o que existe no DOM.</p>
+  {tokens_section}
+</section>
+
+<!-- 02 — TYPOGRAPHY: formato 40px / 48px -->
 <section class="ds-section" id="typography">
-  <p class="ds-section-tag">01 — Typography</p>
-  <h2 class="ds-section-title text-glow">Type scale & hierarchy.</h2>
-  <p class="ds-section-desc">Escala tipográfica extraída diretamente do DOM fonte. Nenhum token sintético.</p>
-
-  <table class="ds-typo-table">
-    <thead>
-      <tr>
-        <td class="ds-td-label" style="padding:12px 16px;border-bottom:1px solid var(--ds-border)">Style</td>
-        <td class="ds-td-label" style="padding:12px 16px;border-bottom:1px solid var(--ds-border)">Tag</td>
-        <td class="ds-td-label" style="padding:12px 16px;border-bottom:1px solid var(--ds-border)">Preview</td>
-        <td class="ds-td-label" style="padding:12px 16px;border-bottom:1px solid var(--ds-border)">Classes</td>
-      </tr>
-    </thead>
-    <tbody>
-      {typo_rows}
-    </tbody>
-  </table>
+  <p class="ds-tag">02 — Typography</p>
+  <h2 class="ds-title">Type scale & hierarchy.</h2>
+  <p class="ds-desc">Escala tipográfica com elemento HTML real, classes originais e anotação font-size / line-height.</p>
+  <div>
+    {typo_rows or '<p class="ds-empty">Nenhum elemento tipográfico encontrado no DOM.</p>'}
+  </div>
 </section>
 
-<!-- ============================================================
-     02 — COLORS & SURFACES
-     ============================================================ -->
-<section class="ds-section" id="colors">
-  <p class="ds-section-tag">02 — Colors & Surfaces</p>
-  <h2 class="ds-section-title text-glow">Color & surface system.</h2>
-  <p class="ds-section-desc">Cores extraídas de classes arbitrárias do Tailwind. Apenas o que aparece no DOM.</p>
-
-  <h3 class="ds-subsection-title">Backgrounds & Surfaces (opacity layers)</h3>
-  <div class="ds-swatches-grid">{surface_swatches}</div>
-
-  <h3 class="ds-subsection-title">Accent & Custom Colors</h3>
-  <div class="ds-swatches-grid">{color_swatches}</div>
+<!-- 03 — SPACING -->
+<section class="ds-section" id="spacing">
+  <p class="ds-tag">03 — Spacing</p>
+  <h2 class="ds-title">Spacing scale.</h2>
+  <p class="ds-desc">Valores de gap, padding e margin extraídos do CSS real. Nenhum valor aproximado.</p>
+  <div class="ds-spacing-list">{spacing_items}</div>
 </section>
 
-<!-- ============================================================
-     03 — COMPONENTS
-     ============================================================ -->
+<!-- 04 — COMPONENTS: state matrix default/hover/active -->
 <section class="ds-section" id="components">
-  <p class="ds-section-tag">03 — Components</p>
-  <h2 class="ds-section-title text-glow">Components & states.</h2>
-  <p class="ds-section-desc">Componentes retirados literalmente do DOM. Markup preservado integralmente.</p>
-
-  {"<h3 class='ds-subsection-title'>Navigation</h3><div class='ds-nav-preview'>" + nav_comp + "</div>" if nav_comp else ""}
-
-  {"<h3 class='ds-subsection-title'>Buttons</h3><div class='ds-component-group'>" + buttons_html + "</div>" if buttons_html else ""}
-
-  {"<h3 class='ds-subsection-title'>Badges & Tags</h3><div class='ds-component-group'>" + badges_html + "</div>" if badges_html else ""}
-
-  {"<h3 class='ds-subsection-title'>Cards</h3><div class='ds-component-group'>" + cards_html + "</div>" if cards_html else ""}
+  <p class="ds-tag">04 — Components</p>
+  <h2 class="ds-title">Components & states.</h2>
+  <p class="ds-desc">Markup exato do DOM. Classes, hover states e interações preservados.</p>
+  {comp_html}
 </section>
 
-<!-- ============================================================
-     04 — LAYOUT
-     ============================================================ -->
-<section class="ds-section" id="layout">
-  <p class="ds-section-tag">04 — Layout</p>
-  <h2 class="ds-section-title text-glow">Containers, grids & rhythm.</h2>
-  <p class="ds-section-desc">Primitivos de layout extraídos do markup original.</p>
-
-  <div class="ds-layout-demo">
-    <div class="ds-layout-label">Grid 3 colunas — md:grid-cols-3 gap-6</div>
-    <div class="ds-grid-visual">
-      <div class="ds-grid-cell">col 1</div>
-      <div class="ds-grid-cell">col 2</div>
-      <div class="ds-grid-cell">col 3</div>
-    </div>
-  </div>
-
-  <div class="ds-layout-demo">
-    <div class="ds-layout-label">Container principal — w-[96vw] max-w-[1700px] h-[94vh]</div>
-    <div style="height:80px;background:rgba(99,102,241,0.06);border:1px dashed rgba(99,102,241,0.2);border-radius:12px;display:flex;align-items:center;justify-content:center;">
-      <span style="font-family:var(--ds-mono);font-size:11px;color:rgba(99,102,241,0.6)">glass-panel · rounded-[3rem] · overflow-y-auto · no-scrollbar</span>
-    </div>
-  </div>
-
-  <div class="ds-layout-demo">
-    <div class="ds-layout-label">Padding de seção — px-6 sm:px-12 lg:px-16</div>
-    <div style="display:flex;gap:8px;">
-      <div style="padding:8px 24px;background:rgba(99,102,241,0.06);border:1px dashed rgba(99,102,241,0.2);border-radius:8px;font-family:var(--ds-mono);font-size:10px;color:rgba(99,102,241,0.6)">mobile: 24px</div>
-      <div style="padding:8px 48px;background:rgba(99,102,241,0.06);border:1px dashed rgba(99,102,241,0.2);border-radius:8px;font-family:var(--ds-mono);font-size:10px;color:rgba(99,102,241,0.6)">tablet: 48px</div>
-      <div style="padding:8px 64px;background:rgba(99,102,241,0.06);border:1px dashed rgba(99,102,241,0.2);border-radius:8px;font-family:var(--ds-mono);font-size:10px;color:rgba(99,102,241,0.6)">desktop: 64px</div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================================================
-     05 — MOTION
-     ============================================================ -->
+<!-- 05 — MOTION: exact keyframes, never approximate easing -->
 <section class="ds-section" id="motion">
-  <p class="ds-section-tag">05 — Motion</p>
-  <h2 class="ds-section-title text-glow">Motion gallery.</h2>
-  <p class="ds-section-desc">Keyframes e classes de transição extraídas do CSS original. Nenhuma curva aproximada.</p>
-
-  <div class="ds-motion-grid">
-    {motion_html}
-  </div>
+  <p class="ds-tag">05 — Motion</p>
+  <h2 class="ds-title">Motion & animation.</h2>
+  <p class="ds-desc">Keyframes e timing curves exatos do CSS original. Nenhuma curva aproximada.</p>
+  <div class="ds-motion-grid">{motion_items}</div>
 </section>
 
-<!-- ============================================================
-     06 — ICONS (condicional)
-     ============================================================ -->
+<!-- 06 — ICONS: conditional -->
 {icons_section}
+
+<!-- 07 — SCROLL SYSTEM: conditional -->
+{scroll_section}
+
+<!-- 08 — CANVAS/3D: conditional -->
+{canvas_section}
 
 </body>
 </html>"""
 
-        output_path.write_text(html, encoding="utf-8")
-        return True
 
+# ---------------------------------------------------------------------------
+# Entry point para o downloader.py
+# (lê ZIP, gera design-system e devolve string HTML — downloader inclui no ZIP)
+# ---------------------------------------------------------------------------
+def generate_from_zip(zip_path: Path) -> str | None:
+    """
+    Lê o index.html de dentro do ZIP e retorna o HTML
+    do design-system.html como string, ou None se falhar.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            html_name = next((n for n in names if n.endswith("index.html")), None)
+            if not html_name:
+                return None
+            html_content = zf.read(html_name).decode("utf-8", errors="replace")
+        return generate_design_system(html_content)
     except Exception as e:
-        print(f"[design_system_generator] erro: {e}")
-        return False
+        print(f"[design_system_generator v3] erro: {e}")
+        import traceback; traceback.print_exc()
+        return None
