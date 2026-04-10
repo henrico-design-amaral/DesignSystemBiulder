@@ -1,0 +1,1002 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Capturar — Website Downloader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --surface: #111111;
+    --surface2: #181818;
+    --border: #222222;
+    --border-active: #3a3a3a;
+    --text: #f0ede6;
+    --text-muted: #666;
+    --text-dim: #333;
+    --accent: #e8ff47;
+    --accent-dim: rgba(232, 255, 71, 0.08);
+    --accent-glow: rgba(232, 255, 71, 0.15);
+    --danger: #ff4757;
+    --success: #00d68f;
+    --mono: 'DM Mono', monospace;
+    --sans: 'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    min-height: 100vh;
+    overflow-x: hidden;
+    cursor: none;
+  }
+
+  /* Custom cursor */
+  .cursor {
+    position: fixed;
+    width: 10px;
+    height: 10px;
+    background: var(--accent);
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 9999;
+    transform: translate(-50%, -50%);
+    transition: transform 0.08s ease, width 0.2s ease, height 0.2s ease, opacity 0.2s ease;
+    mix-blend-mode: difference;
+  }
+
+  .cursor-ring {
+    position: fixed;
+    width: 36px;
+    height: 36px;
+    border: 1px solid rgba(232, 255, 71, 0.4);
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 9998;
+    transform: translate(-50%, -50%);
+    transition: transform 0.18s ease, width 0.25s ease, height 0.25s ease, border-color 0.2s ease;
+  }
+
+  .cursor.hovered { width: 6px; height: 6px; }
+  .cursor-ring.hovered { width: 50px; height: 50px; border-color: var(--accent); }
+
+  /* Grain overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='1'/%3E%3C/svg%3E");
+    opacity: 0.025;
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  /* Grid background */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 60px 60px;
+    opacity: 0.3;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Layout */
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 32px;
+  }
+
+  /* Header */
+  header {
+    padding: 40px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .logo {
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .logo-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  .status-pill {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    padding: 5px 12px;
+    border-radius: 100px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .status-dot {
+    width: 5px;
+    height: 5px;
+    background: var(--success);
+    border-radius: 50%;
+  }
+
+  /* Hero */
+  .hero {
+    padding: 80px 0 60px;
+  }
+
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--accent);
+    border: 1px solid rgba(232, 255, 71, 0.2);
+    background: var(--accent-dim);
+    padding: 6px 14px;
+    border-radius: 4px;
+    margin-bottom: 32px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  h1 {
+    font-family: var(--sans);
+    font-size: clamp(52px, 8vw, 88px);
+    font-weight: 800;
+    line-height: 0.95;
+    letter-spacing: -0.03em;
+    color: var(--text);
+    margin-bottom: 24px;
+  }
+
+  h1 em {
+    font-style: normal;
+    color: var(--accent);
+  }
+
+  .subtitle {
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.7;
+    max-width: 460px;
+    letter-spacing: 0.01em;
+  }
+
+  /* Input area */
+  .input-section {
+    margin: 48px 0;
+  }
+
+  .input-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    display: block;
+  }
+
+  .input-wrapper {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    overflow: hidden;
+  }
+
+  .input-wrapper:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow), inset 0 0 40px rgba(232, 255, 71, 0.02);
+  }
+
+  .url-prefix {
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    font-size: 13px;
+    color: var(--text-dim);
+    background: var(--surface2);
+    border-right: 1px solid var(--border);
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  input[type="url"] {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--text);
+    padding: 18px 20px;
+    caret-color: var(--accent);
+    min-width: 0;
+  }
+
+  input[type="url"]::placeholder {
+    color: var(--text-dim);
+  }
+
+  .btn-download {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0 28px;
+    cursor: none;
+    transition: opacity 0.15s ease, transform 0.1s ease;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .btn-download:hover { opacity: 0.88; }
+  .btn-download:active { transform: scale(0.98); }
+  .btn-download:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-download svg {
+    transition: transform 0.2s ease;
+  }
+
+  .btn-download:hover svg {
+    transform: translateY(2px);
+  }
+
+  /* Options */
+  .options-row {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+
+  .option-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: none;
+    user-select: none;
+  }
+
+  .option-toggle input[type="checkbox"] {
+    appearance: none;
+    width: 32px;
+    height: 18px;
+    background: var(--surface2);
+    border: 1px solid var(--border-active);
+    border-radius: 100px;
+    cursor: none;
+    position: relative;
+    transition: background 0.2s ease, border-color 0.2s ease;
+    flex-shrink: 0;
+  }
+
+  .option-toggle input[type="checkbox"]::after {
+    content: '';
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    top: 2px;
+    left: 2px;
+    transition: transform 0.2s ease, background 0.2s ease;
+  }
+
+  .option-toggle input[type="checkbox"]:checked {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+  }
+
+  .option-toggle input[type="checkbox"]:checked::after {
+    transform: translateX(14px);
+    background: var(--accent);
+  }
+
+  /* Progress / Log area */
+  .progress-section {
+    display: none;
+    margin: 40px 0;
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+
+  .progress-section.visible {
+    display: block;
+  }
+
+  .progress-section.shown {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .progress-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+  }
+
+  .progress-pct {
+    font-size: 13px;
+    color: var(--accent);
+    font-family: var(--mono);
+  }
+
+  .progress-bar-track {
+    height: 2px;
+    background: var(--surface2);
+    border-radius: 2px;
+    margin-bottom: 20px;
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.4s ease;
+    box-shadow: 0 0 12px var(--accent-glow);
+  }
+
+  .log-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    height: 200px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.8;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .log-box::-webkit-scrollbar { width: 4px; }
+  .log-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .log-line {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    opacity: 0;
+    animation: logIn 0.25s ease forwards;
+  }
+
+  @keyframes logIn {
+    from { opacity: 0; transform: translateX(-6px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .log-time { color: var(--text-dim); flex-shrink: 0; }
+  .log-msg { color: var(--text-muted); }
+  .log-msg.success { color: var(--success); }
+  .log-msg.error { color: var(--danger); }
+  .log-msg.accent { color: var(--accent); }
+
+  /* Download result */
+  .result-section {
+    display: none;
+    margin: 32px 0;
+  }
+
+  .result-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 28px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    animation: slideUp 0.35s ease forwards;
+  }
+
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .result-info { flex: 1; min-width: 0; }
+
+  .result-filename {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    font-family: var(--mono);
+    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .result-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    gap: 16px;
+  }
+
+  .result-meta span {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .btn-get {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 14px 24px;
+    border-radius: 6px;
+    cursor: none;
+    text-decoration: none;
+    transition: opacity 0.15s;
+    flex-shrink: 0;
+  }
+
+  .btn-get:hover { opacity: 0.85; }
+
+  /* Features */
+  .features {
+    margin: 80px 0;
+    padding-top: 48px;
+    border-top: 1px solid var(--border);
+  }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .feature-card {
+    background: var(--bg);
+    padding: 28px 24px;
+    transition: background 0.2s ease;
+  }
+
+  .feature-card:hover { background: var(--surface); }
+
+  .feature-icon {
+    font-size: 20px;
+    margin-bottom: 14px;
+    display: block;
+  }
+
+  .feature-title {
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+    letter-spacing: -0.01em;
+  }
+
+  .feature-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.7;
+  }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 28px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  footer a {
+    color: var(--text-dim);
+    text-decoration: none;
+    transition: color 0.15s;
+  }
+
+  footer a:hover { color: var(--accent); }
+
+  /* Error state */
+  .error-toast {
+    position: fixed;
+    bottom: 32px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: var(--danger);
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: var(--mono);
+    z-index: 200;
+    transition: transform 0.3s ease;
+    pointer-events: none;
+  }
+
+  .error-toast.show { transform: translateX(-50%) translateY(0); }
+
+  /* Responsive */
+  @media (max-width: 680px) {
+    .features-grid { grid-template-columns: 1fr; }
+    h1 { font-size: 44px; }
+    .btn-download { padding: 0 18px; font-size: 12px; }
+    .input-wrapper { flex-wrap: wrap; }
+    .btn-download { width: 100%; justify-content: center; padding: 16px; }
+    .url-prefix { display: none; }
+    .options-row { gap: 16px; }
+    .result-card { flex-direction: column; align-items: flex-start; }
+    .btn-get { width: 100%; justify-content: center; }
+  }
+
+  /* Spinner */
+  .spin {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(0,0,0,0.2);
+    border-top-color: #000;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* Stagger entrance */
+  .stagger > * {
+    opacity: 0;
+    transform: translateY(20px);
+    animation: fadeUp 0.5s ease forwards;
+  }
+
+  .stagger > *:nth-child(1) { animation-delay: 0.05s; }
+  .stagger > *:nth-child(2) { animation-delay: 0.12s; }
+  .stagger > *:nth-child(3) { animation-delay: 0.2s; }
+  .stagger > *:nth-child(4) { animation-delay: 0.28s; }
+
+  @keyframes fadeUp {
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<div class="cursor" id="cursor"></div>
+<div class="cursor-ring" id="cursorRing"></div>
+<div class="error-toast" id="errorToast"></div>
+
+<div class="wrap">
+
+  <header>
+    <div class="logo">
+      <span class="logo-dot"></span>
+      Capturar
+    </div>
+    <div class="status-pill">
+      <span class="status-dot"></span>
+      sistema operacional
+    </div>
+  </header>
+
+  <section class="hero stagger">
+    <div class="tag">⬡ website downloader v2</div>
+    <h1>Baixe<br>qualquer<br><em>site.</em></h1>
+    <p class="subtitle">Replica completa com HTML, CSS, JS, imagens e fontes — incluindo sites modernos com React, Next.js e Nuxt. Tudo em um ZIP.</p>
+  </section>
+
+  <section class="input-section">
+    <label class="input-label" for="urlInput">// URL do site</label>
+    <div class="input-wrapper" id="inputWrapper">
+      <span class="url-prefix">https://</span>
+      <input
+        type="url"
+        id="urlInput"
+        placeholder="exemplo.com.br"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button class="btn-download" id="btnDownload" onclick="startDownload()">
+        <span id="btnLabel">Capturar</span>
+        <svg id="btnIcon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M7 1v8M4 7l3 3 3-3M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="options-row">
+      <label class="option-toggle">
+        <input type="checkbox" id="optJS" checked>
+        <span>Renderizar JavaScript</span>
+      </label>
+      <label class="option-toggle">
+        <input type="checkbox" id="optLazy" checked>
+        <span>Capturar lazy loading</span>
+      </label>
+      <label class="option-toggle">
+        <input type="checkbox" id="optClean" checked>
+        <span>Limpar scripts offline</span>
+      </label>
+    </div>
+  </section>
+
+  <section class="progress-section" id="progressSection">
+    <div class="progress-header">
+      <span class="progress-label">// progresso</span>
+      <span class="progress-pct" id="progressPct">0%</span>
+    </div>
+    <div class="progress-bar-track">
+      <div class="progress-bar-fill" id="progressBar"></div>
+    </div>
+    <div class="log-box" id="logBox"></div>
+  </section>
+
+  <section class="result-section" id="resultSection">
+    <div class="result-card">
+      <div class="result-info">
+        <div class="result-filename" id="resultFilename">site-replica.zip</div>
+        <div class="result-meta">
+          <span>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M10 5H7V2" stroke="currentColor" stroke-linecap="round"/>
+              <path d="M2 10l8-8" stroke="currentColor" stroke-linecap="round"/>
+            </svg>
+            <span id="resultSize">—</span>
+          </span>
+          <span>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <rect x="1" y="1" width="10" height="10" rx="2" stroke="currentColor"/>
+              <path d="M4 6h4M6 4v4" stroke="currentColor" stroke-linecap="round"/>
+            </svg>
+            <span id="resultFiles">—</span> arquivos
+          </span>
+          <span>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <circle cx="6" cy="6" r="5" stroke="currentColor"/>
+              <path d="M6 3v3l2 2" stroke="currentColor" stroke-linecap="round"/>
+            </svg>
+            <span id="resultTime">—</span>
+          </span>
+        </div>
+      </div>
+      <a class="btn-get" id="resultLink" href="#" download>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M7 1v8M4 7l3 3 3-3M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Baixar ZIP
+      </a>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="features-grid">
+      <div class="feature-card">
+        <span class="feature-icon">🎭</span>
+        <div class="feature-title">JS real renderizado</div>
+        <div class="feature-desc">Usa Playwright + Chromium para executar o JavaScript antes de capturar. Next.js, Nuxt, Gatsby, tudo funciona.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">📦</span>
+        <div class="feature-title">Entrega em ZIP</div>
+        <div class="feature-desc">HTML, CSS, JS, imagens, fontes e SVGs — tudo empacotado com caminhos relativos para funcionar offline.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🖼️</span>
+        <div class="feature-title">Lazy load capturado</div>
+        <div class="feature-desc">Scrola a página automaticamente para forçar o carregamento de todas as imagens antes de exportar.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🧹</span>
+        <div class="feature-title">Limpeza inteligente</div>
+        <div class="feature-desc">Remove scripts de hydration de SPAs e bibliotecas de scroll que quebram o site sem servidor.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">⚡</span>
+        <div class="feature-title">Logs em tempo real</div>
+        <div class="feature-desc">Acompanhe cada etapa do processo via Server-Sent Events. Sem refresh, sem espera no escuro.</div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🗑️</span>
+        <div class="feature-title">Zero retenção</div>
+        <div class="feature-desc">Os arquivos são deletados automaticamente após o download. Nada fica armazenado no servidor.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Capturar · Website Downloader</span>
+    <span>Uso pessoal e educacional</span>
+  </footer>
+
+</div>
+
+<script>
+  // Custom cursor
+  const cursor = document.getElementById('cursor');
+  const ring = document.getElementById('cursorRing');
+  let mx = 0, my = 0, rx = 0, ry = 0;
+
+  document.addEventListener('mousemove', e => {
+    mx = e.clientX; my = e.clientY;
+    cursor.style.left = mx + 'px';
+    cursor.style.top = my + 'px';
+  });
+
+  function animRing() {
+    rx += (mx - rx) * 0.12;
+    ry += (my - ry) * 0.12;
+    ring.style.left = rx + 'px';
+    ring.style.top = ry + 'px';
+    requestAnimationFrame(animRing);
+  }
+  animRing();
+
+  document.querySelectorAll('a, button, input, label, .feature-card').forEach(el => {
+    el.addEventListener('mouseenter', () => { cursor.classList.add('hovered'); ring.classList.add('hovered'); });
+    el.addEventListener('mouseleave', () => { cursor.classList.remove('hovered'); ring.classList.remove('hovered'); });
+  });
+
+  // State
+  let isRunning = false;
+  let startTime = null;
+  let eventSource = null;
+  const LOG_STEPS = [
+    { pct: 8,  msg: 'Iniciando Playwright + Chromium...', type: '' },
+    { pct: 18, msg: 'Abrindo browser headless...', type: '' },
+    { pct: 28, msg: 'Navegando para a URL alvo...', type: '' },
+    { pct: 38, msg: 'Aguardando renderização JavaScript...', type: '' },
+    { pct: 48, msg: 'Rolando página para capturar lazy loading...', type: '' },
+    { pct: 58, msg: 'Capturando recursos de rede (CSS, JS, fontes)...', type: '' },
+    { pct: 65, msg: 'Baixando imagens...', type: '' },
+    { pct: 72, msg: 'Processando HTML com BeautifulSoup...', type: '' },
+    { pct: 80, msg: 'Reescrevendo URLs para caminhos locais...', type: '' },
+    { pct: 87, msg: 'Removendo scripts de hydration e smooth scroll...', type: '' },
+    { pct: 93, msg: 'Injetando correções de scroll offline...', type: '' },
+    { pct: 97, msg: 'Empacotando em ZIP...', type: '' },
+    { pct: 100, msg: 'Concluído.', type: 'success' },
+  ];
+
+  function log(msg, type = '') {
+    const box = document.getElementById('logBox');
+    const t = new Date().toTimeString().slice(0, 8);
+    const line = document.createElement('div');
+    line.className = 'log-line';
+    line.innerHTML = `<span class="log-time">${t}</span><span class="log-msg ${type}">${msg}</span>`;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function setProgress(pct) {
+    document.getElementById('progressBar').style.width = pct + '%';
+    document.getElementById('progressPct').textContent = Math.round(pct) + '%';
+  }
+
+  function showSection(id) {
+    const el = document.getElementById(id);
+    el.style.display = 'block';
+    requestAnimationFrame(() => el.classList.add('shown'));
+  }
+
+  function showError(msg) {
+    const toast = document.getElementById('errorToast');
+    toast.textContent = '✕ ' + msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 4000);
+  }
+
+  function resetBtn() {
+    const btn = document.getElementById('btnDownload');
+    const label = document.getElementById('btnLabel');
+    const icon = document.getElementById('btnIcon');
+    btn.disabled = false;
+    label.textContent = 'Capturar';
+    icon.innerHTML = '<path d="M7 1v8M4 7l3 3 3-3M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>';
+  }
+
+  function getUrl() {
+    let v = document.getElementById('urlInput').value.trim();
+    if (!v) return null;
+    if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+    return v;
+  }
+
+  function formatTime(ms) {
+    if (ms < 1000) return ms + 'ms';
+    return (ms / 1000).toFixed(1) + 's';
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return '—';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  }
+
+  async function startDownload() {
+    if (isRunning) return;
+    const url = getUrl();
+    if (!url) { showError('Cole uma URL válida primeiro.'); return; }
+
+    try { new URL(url); } catch { showError('URL inválida.'); return; }
+
+    isRunning = true;
+    startTime = Date.now();
+
+    // Reset UI
+    document.getElementById('logBox').innerHTML = '';
+    document.getElementById('resultSection').style.display = 'none';
+    setProgress(0);
+
+    // Show progress
+    const ps = document.getElementById('progressSection');
+    ps.style.display = 'block';
+    ps.classList.remove('shown');
+    requestAnimationFrame(() => ps.classList.add('shown'));
+
+    // Update btn
+    const btn = document.getElementById('btnDownload');
+    const label = document.getElementById('btnLabel');
+    const icon = document.getElementById('btnIcon');
+    btn.disabled = true;
+    label.textContent = 'Capturando';
+    icon.innerHTML = '<div class="spin"></div>';
+
+    // Simulate backend SSE (demo mode)
+    // In production: connect to /download?url=... with EventSource
+    const hostname = new URL(url).hostname.replace('www.', '');
+    log(`Iniciando captura de ${url}`, 'accent');
+    log(`JS: ${document.getElementById('optJS').checked ? 'ativado' : 'desativado'} · Lazy: ${document.getElementById('optLazy').checked ? 'ativado' : 'desativado'} · Limpeza: ${document.getElementById('optClean').checked ? 'ativada' : 'desativada'}`);
+
+    // Connect to real backend SSE endpoint
+    // Try real endpoint, fall back to demo simulation
+    const useDemo = true; // set to false when backend is live
+
+    if (!useDemo) {
+      const params = new URLSearchParams({
+        url,
+        js: document.getElementById('optJS').checked,
+        lazy: document.getElementById('optLazy').checked,
+        clean: document.getElementById('optClean').checked,
+      });
+      eventSource = new EventSource(`/download?${params}`);
+
+      eventSource.onmessage = e => {
+        const data = JSON.parse(e.data);
+        if (data.type === 'log') { log(data.msg, data.level || ''); }
+        if (data.progress !== undefined) { setProgress(data.progress); }
+        if (data.type === 'done') {
+          finishDownload(data, hostname);
+          eventSource.close();
+        }
+        if (data.type === 'error') {
+          showError(data.msg);
+          resetBtn();
+          isRunning = false;
+          eventSource.close();
+        }
+      };
+      eventSource.onerror = () => {
+        showError('Falha na conexão com o servidor.');
+        resetBtn();
+        isRunning = false;
+        eventSource.close();
+      };
+    } else {
+      // Demo simulation
+      let step = 0;
+      function nextStep() {
+        if (step >= LOG_STEPS.length) {
+          const elapsed = Date.now() - startTime;
+          finishDownload({
+            filename: `${hostname}.zip`,
+            size: Math.floor(Math.random() * 8 * 1024 * 1024) + 512 * 1024,
+            files: Math.floor(Math.random() * 80) + 20,
+            elapsed,
+          }, hostname);
+          return;
+        }
+        const s = LOG_STEPS[step];
+        setProgress(s.pct);
+        log(s.msg, s.type);
+        step++;
+        const delay = step === LOG_STEPS.length ? 600 : Math.random() * 600 + 250;
+        setTimeout(nextStep, delay);
+      }
+      setTimeout(nextStep, 300);
+    }
+  }
+
+  function finishDownload(data, hostname) {
+    const elapsed = data.elapsed || (Date.now() - startTime);
+    document.getElementById('resultFilename').textContent = data.filename || `${hostname}.zip`;
+    document.getElementById('resultSize').textContent = formatBytes(data.size);
+    document.getElementById('resultFiles').textContent = data.files || '—';
+    document.getElementById('resultTime').textContent = formatTime(elapsed);
+
+    if (data.downloadUrl) {
+      document.getElementById('resultLink').href = data.downloadUrl;
+    }
+
+    document.getElementById('resultSection').style.display = 'block';
+    resetBtn();
+    isRunning = false;
+  }
+
+  // Allow Enter key
+  document.getElementById('urlInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startDownload();
+  });
+</script>
+</body>
+</html>

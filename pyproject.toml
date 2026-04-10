@@ -1,0 +1,16 @@
+[project]
+name = "capturar"
+version = "1.0.0"
+description = "Website Downloader — replica completa com JS renderizado"
+requires-python = ">=3.11"
+dependencies = [
+    "flask>=3.0",
+    "playwright>=1.44",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "gunicorn>=22.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
