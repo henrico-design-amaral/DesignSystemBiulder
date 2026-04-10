@@ -959,63 +959,36 @@
     log(`Iniciando captura de ${url}`, 'accent');
     log(`JS: ${document.getElementById('optJS').checked ? 'ativado' : 'desativado'} · Lazy: ${document.getElementById('optLazy').checked ? 'ativado' : 'desativado'} · Limpeza: ${document.getElementById('optClean').checked ? 'ativada' : 'desativada'}`);
 
-    // Connect to real backend SSE endpoint
-    // Try real endpoint, fall back to demo simulation
-    const useDemo = true; // set to false when backend is live
+    // Conecta ao backend real via SSE
+    const params = new URLSearchParams({
+      url,
+      js: document.getElementById('optJS').checked,
+      lazy: document.getElementById('optLazy').checked,
+      clean: document.getElementById('optClean').checked,
+    });
+    eventSource = new EventSource(`/download?${params}`);
 
-    if (!useDemo) {
-      const params = new URLSearchParams({
-        url,
-        js: document.getElementById('optJS').checked,
-        lazy: document.getElementById('optLazy').checked,
-        clean: document.getElementById('optClean').checked,
-      });
-      eventSource = new EventSource(`/download?${params}`);
-
-      eventSource.onmessage = e => {
-        const data = JSON.parse(e.data);
-        if (data.type === 'log') { log(data.msg, data.level || ''); }
-        if (data.progress !== undefined) { setProgress(data.progress); }
-        if (data.type === 'done') {
-          finishDownload(data, hostname);
-          eventSource.close();
-        }
-        if (data.type === 'error') {
-          showError(data.msg);
-          resetBtn();
-          isRunning = false;
-          eventSource.close();
-        }
-      };
-      eventSource.onerror = () => {
-        showError('Falha na conexão com o servidor.');
+    eventSource.onmessage = e => {
+      const data = JSON.parse(e.data);
+      if (data.type === 'log') { log(data.msg, data.level || ''); }
+      if (data.progress !== undefined) { setProgress(data.progress); }
+      if (data.type === 'done') {
+        finishDownload(data, hostname);
+        eventSource.close();
+      }
+      if (data.type === 'error') {
+        showError(data.msg);
         resetBtn();
         isRunning = false;
         eventSource.close();
-      };
-    } else {
-      // Demo simulation
-      let step = 0;
-      function nextStep() {
-        if (step >= LOG_STEPS.length) {
-          const elapsed = Date.now() - startTime;
-          finishDownload({
-            filename: `${hostname}.zip`,
-            size: Math.floor(Math.random() * 8 * 1024 * 1024) + 512 * 1024,
-            files: Math.floor(Math.random() * 80) + 20,
-            elapsed,
-          }, hostname);
-          return;
-        }
-        const s = LOG_STEPS[step];
-        setProgress(s.pct);
-        log(s.msg, s.type);
-        step++;
-        const delay = step === LOG_STEPS.length ? 600 : Math.random() * 600 + 250;
-        setTimeout(nextStep, delay);
       }
-      setTimeout(nextStep, 300);
-    }
+    };
+    eventSource.onerror = () => {
+      showError('Falha na conexão com o servidor.');
+      resetBtn();
+      isRunning = false;
+      eventSource.close();
+    };
   }
 
   function finishDownload(data, hostname) {
