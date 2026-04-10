@@ -7,13 +7,12 @@ import re
 import urllib.request
 from collections import Counter
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 MODEL = "claude-sonnet-4-20250514"
-MAX_TOKENS = 6000
+MAX_TOKENS = 8000
 DESIGN_SYSTEM_MODE = os.getenv("DESIGN_SYSTEM_MODE", "local").strip().lower()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
@@ -22,6 +21,139 @@ KEYFRAME_BLOCK_PATTERN = re.compile(r"@keyframes\s+[\w-]+\s*\{(?:[^{}]+|\{[^{}]*
 MEDIA_PATTERN = re.compile(r"@media\s*\((min|max)-width\s*:\s*([^\)]+)\)", re.IGNORECASE)
 COLOR_PATTERN = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^\)]+\)|hsla?\([^\)]+\)|oklch\([^\)]+\)|color\([^\)]+\)")
 TRANSITION_PATTERN = re.compile(r"transition[^;]*:[^;]+;|animation[^;]*:[^;]+;|cubic-bezier\([^\)]+\)", re.IGNORECASE)
+CSS_RULE_PATTERN = re.compile(r"([^{}@]+)\{([^{}]+)\}")
+DECL_PATTERN = re.compile(r"([\w-]+)\s*:\s*([^;}{]+)")
+GRADIENT_PATTERN = re.compile(r"(?:linear|radial|conic)-gradient\([^\)]+\)", re.IGNORECASE)
+
+STYLE_ORDER = [
+    "Heading 1",
+    "Heading 2",
+    "Heading 3",
+    "Heading 4",
+    "Bold L",
+    "Bold M",
+    "Bold S",
+    "Paragraph",
+    "Regular L",
+    "Regular M",
+    "Regular S",
+]
+
+PROMPT_TEXT = """You are a Design System Showcase Builder.
+
+You are given a reference website HTML:
+$ARGUMENTS
+
+Your task is to create one new intermediate HTML file that acts as a living design system + pattern library for this exact design.
+
+GOAL
+
+Generate one single file called: design-system.html and place it in the same folder of the html file.
+
+This file must preserve the exact look & behavior of the reference design by reusing the original HTML, CSS classes, animations, keyframes, transitions, effects, and layout patterns — not approximations.
+
+HARD RULES (NON-NEGOTIABLE)
+
+Do not redesign or invent new styles.
+Reuse exact class names, animations, timing, easing, hover/focus states.
+Reference the same CSS/JS assets used by the original.
+If a style/component is not used in the reference HTML, do not add it.
+The file must be self-explanatory by structure (sections = documentation).
+Include a top horizontal nav with anchor links to each section.
+
+OBJECTIVE
+
+Build a single page composed of canonical examples of the design system, organized in sections.
+
+Hero (Exact Clone, Text Adapted)
+
+The first section MUST be a direct clone of the original Hero:
+
+• Same HTML structure
+• Same class names
+• Same layout
+• Same images and components
+• Same animations and interactions
+• Same buttons and background
+• Same UI components (if any)
+
+Allowed change (only this):
+
+• Replace the hero text content to present the Design System
+• Keep similar text length and hierarchy
+
+Forbidden:
+
+• Do not change layout, spacing, alignment, or animations
+• Do not add or remove elements
+
+Typography
+
+Create a Typography section rendered as a spec table / vertical list.
+
+Each row MUST contain:
+
+• Style name (e.g. “Heading 1”, “Bold M”)
+• Live text preview using the exact original HTML element and CSS classes
+• Font size / line-height label aligned right (format: 40px / 48px)
+
+Include ONLY styles that exist in the reference HTML, in this order:
+
+• Heading 1
+• Heading 2
+• Heading 3
+• Heading 4
+• Bold L / Bold M / Bold S
+• Paragraph (larger body, if exists)
+• Regular L / Regular M / Regular S
+
+Rules:
+
+• No inline styles
+• No normalization
+• Typography, colors, spacing, and gradients MUST come from original CSS
+• If a style uses gradient text, show it exactly the same
+• If a style does not exist, DO NOT include it
+
+This section must communicate hierarchy, scale, and rhythm at a glance.
+
+Colors & Surfaces
+
+• Backgrounds (page, section, card, glass/blur if exists)
+• Borders, dividers, overlays
+• Gradients (as swatches + usage context)
+
+UI Components
+
+• Buttons, inputs, cards, etc. (only those that exist)
+• Show states side-by-side: default / hover / active / focus / disabled
+• Inputs only if present (default/focus/error if applicable)
+
+Layout & Spacing
+
+• Containers, grids, columns, section paddings
+• Show 2–3 real layout patterns from the reference (hero layout, grid, split)
+
+Motion & Interaction
+
+Show all motion behaviors present:
+
+• Entrance animations (if any)
+• Hover lifts/glows
+• Button hover transitions
+• Scroll/reveal behavior (only if present)
+
+Include a small Motion Gallery demonstrating each animation class.
+
+Icons
+
+If the reference uses icons:
+
+• Display the same icon style/system
+• Show size variants and color inheritance
+• Use the same markup and classes
+
+If icons are not present, omit this section entirely."""
 
 SEMANTIC_MAP = [
     (r"brand|primary|accent|highlight", "Brand Primary"),
@@ -51,7 +183,6 @@ def _infer_label(var_name: str) -> str:
     return var_name.strip("-").replace("-", " ").title()
 
 
-
 def _call_claude_api(system: str, user: str) -> str | None:
     if DESIGN_SYSTEM_MODE not in {"auto", "llm"} or not ANTHROPIC_API_KEY:
         return None
@@ -61,7 +192,7 @@ def _call_claude_api(system: str, user: str) -> str | None:
             "model": MODEL,
             "max_tokens": MAX_TOKENS,
             "system": system,
-            "messages": [{"role": "user", "content": user[:120000]}],
+            "messages": [{"role": "user", "content": user[:180000]}],
         }
     ).encode("utf-8")
 
@@ -86,469 +217,501 @@ def _call_claude_api(system: str, user: str) -> str | None:
     return None
 
 
+def _parse_inline_style(style_text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for name, value in DECL_PATTERN.findall(style_text or ""):
+        values[name.strip().lower()] = value.strip()
+    return values
 
-def _collect_css_sources(bundle: dict) -> tuple[list[str], list[str]]:
+
+def _collect_css_sources(bundle: dict) -> tuple[list[str], list[str], list[str]]:
     asset_root = Path(bundle.get("asset_root") or ".")
     resources = bundle.get("resources", {})
     css_links: list[str] = []
     css_chunks: list[str] = []
+    script_links: list[str] = []
 
     for resource in resources.values():
         local_path = resource.get("local_path", "")
         content_type = (resource.get("content_type") or "").lower()
+        disk_candidate = asset_root / Path(local_path).name
         if local_path.endswith(".css") or "text/css" in content_type:
             css_links.append(local_path)
             try:
-                css_chunks.append((asset_root / Path(local_path).name).read_text(encoding="utf-8", errors="ignore"))
+                css_chunks.append(disk_candidate.read_text(encoding="utf-8", errors="ignore"))
             except FileNotFoundError:
                 try:
                     css_chunks.append((asset_root.parent / local_path).read_text(encoding="utf-8", errors="ignore"))
                 except FileNotFoundError:
-                    continue
+                    pass
+        if local_path.endswith(".js") or "javascript" in content_type:
+            script_links.append(local_path)
 
     for page in bundle.get("pages", {}).values():
         soup = BeautifulSoup(page.get("html", ""), "html.parser")
         css_chunks.extend(tag.string or "" for tag in soup.find_all("style") if tag.string)
+        for script in soup.find_all("script"):
+            src = script.get("src")
+            if src and src not in script_links:
+                script_links.append(src)
 
-    return css_links, css_chunks
+    return css_links, css_chunks, script_links
 
+
+def _collect_rule_maps(all_css: str) -> list[tuple[str, dict[str, str]]]:
+    rules: list[tuple[str, dict[str, str]]] = []
+    for selector_blob, body in CSS_RULE_PATTERN.findall(all_css):
+        selector = selector_blob.strip()
+        if not selector or selector.startswith("@"):
+            continue
+        decls = {name.strip().lower(): value.strip() for name, value in DECL_PATTERN.findall(body)}
+        if decls:
+            rules.append((selector, decls))
+    return rules
+
+
+def _selector_matches(selector: str, tag_name: str, classes: set[str]) -> bool:
+    for part in selector.split(","):
+        s = re.sub(r':[\w\-()]+', '', part).strip()
+        if not s:
+            continue
+        if any(tok in s for tok in ['[', '>', '+', '~']):
+            continue
+        tag_match = re.match(r'^([a-zA-Z][\w-]*)', s)
+        if tag_match and tag_match.group(1).lower() != tag_name.lower():
+            continue
+        needed_classes = {c for c in re.findall(r'\.([\w-]+)', s)}
+        if needed_classes and not needed_classes.issubset(classes):
+            continue
+        if tag_match or needed_classes:
+            return True
+    return False
+
+
+def _compute_metrics(el: Tag, rule_maps: list[tuple[str, dict[str, str]]]) -> dict[str, str]:
+    classes = set(el.get('class', []))
+    tag_name = el.name.lower()
+    style_values = _parse_inline_style(el.get('style', ''))
+    resolved: dict[str, str] = {}
+    for selector, decls in rule_maps:
+        if _selector_matches(selector, tag_name, classes):
+            for key in ('font-size', 'line-height', 'font-weight', 'letter-spacing'):
+                if key in decls:
+                    resolved[key] = decls[key]
+    resolved.update({k: v for k, v in style_values.items() if k in {'font-size', 'line-height', 'font-weight', 'letter-spacing'}})
+    return resolved
+
+
+def _metric_label(metrics: dict[str, str]) -> str:
+    return f"{metrics.get('font-size', '—')} / {metrics.get('line-height', '—')}"
+
+
+def _clone_and_replace_text(node: Tag, replacements: list[str]) -> str:
+    clone = BeautifulSoup(str(node), 'html.parser')
+    strings = [s for s in clone.find_all(string=True) if isinstance(s, NavigableString) and s.strip()]
+    rep_iter = iter(replacements)
+    for s in strings:
+        if s.parent and s.parent.name in {'script', 'style'}:
+            continue
+        try:
+            s.replace_with(next(rep_iter))
+        except StopIteration:
+            break
+    return str(clone)
+
+
+def _extract_hero_markup(root_soup: BeautifulSoup) -> str:
+    for tag in root_soup.find_all(['section', 'header', 'main', 'div']):
+        if tag.find('h1') and len(str(tag)) < 70000:
+            return _clone_and_replace_text(
+                tag,
+                [
+                    'Design system, motion & asset fidelity for the exact captured site.',
+                    'A living evidence file that reuses the original classes, assets, transitions and patterns from the exported bundle.',
+                    'See sections',
+                    'Open manifest',
+                ],
+            )
+    return ''
+
+
+def _style_bucket(metrics: dict[str, str], tag_name: str) -> tuple[str, float]:
+    size_match = re.search(r'([\d.]+)', metrics.get('font-size', '0'))
+    weight_match = re.search(r'([\d.]+)', metrics.get('font-weight', '400'))
+    size = float(size_match.group(1)) if size_match else 0.0
+    weight = float(weight_match.group(1)) if weight_match else 400.0
+
+    if tag_name == 'h1':
+        return 'Heading 1', size
+    if tag_name == 'h2':
+        return 'Heading 2', size
+    if tag_name == 'h3':
+        return 'Heading 3', size
+    if tag_name == 'h4':
+        return 'Heading 4', size
+    if tag_name == 'p' and size >= 18:
+        return 'Paragraph', size
+    if weight >= 600:
+        if size >= 20:
+            return 'Bold L', size
+        if size >= 16:
+            return 'Bold M', size
+        return 'Bold S', size
+    if size >= 20:
+        return 'Regular L', size
+    if size >= 16:
+        return 'Regular M', size
+    return 'Regular S', size
+
+
+def _extract_typography(root_soup: BeautifulSoup, rule_maps: list[tuple[str, dict[str, str]]]) -> list[dict]:
+    candidates: list[dict] = []
+    for el in root_soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'span', 'a', 'strong', 'button', 'label', 'div']):
+        text = el.get_text(' ', strip=True)
+        if not text or len(text) > 120 or el.find(['img', 'svg', 'video']):
+            continue
+        metrics = _compute_metrics(el, rule_maps)
+        label, size = _style_bucket(metrics, el.name.lower())
+        candidates.append(
+            {
+                'label': label,
+                'size': size,
+                'metric_label': _metric_label(metrics),
+                'markup': str(el),
+                'classes': ' '.join(el.get('class', [])),
+            }
+        )
+
+    chosen: dict[str, dict] = {}
+    for wanted in STYLE_ORDER:
+        matches = [c for c in candidates if c['label'] == wanted]
+        if not matches:
+            continue
+        matches.sort(key=lambda c: (c['size'], len(c['classes'])), reverse=True)
+        chosen[wanted] = matches[0]
+    return [chosen[name] for name in STYLE_ORDER if name in chosen]
+
+
+def _find_components(root_soup: BeautifulSoup) -> dict[str, list[str]]:
+    out = {'buttons': [], 'cards': [], 'inputs': [], 'icons': [], 'layouts': []}
+
+    for node in root_soup.find_all(['a', 'button']):
+        text = node.get_text(' ', strip=True)
+        if text and len(text) <= 50 and len(str(node)) < 2500 and str(node) not in out['buttons']:
+            out['buttons'].append(str(node))
+        if len(out['buttons']) >= 4:
+            break
+
+    for node in root_soup.find_all(['input', 'textarea', 'select']):
+        if len(str(node)) < 2500 and str(node) not in out['inputs']:
+            out['inputs'].append(str(node))
+        if len(out['inputs']) >= 3:
+            break
+
+    for node in root_soup.find_all(['article', 'a', 'div', 'section']):
+        classes = ' '.join(node.get('class', [])).lower()
+        if any(k in classes for k in ['card', 'tile', 'project', 'case', 'feature']) and len(str(node)) < 14000:
+            if str(node) not in out['cards']:
+                out['cards'].append(str(node))
+        if len(out['cards']) >= 4:
+            break
+
+    for node in root_soup.find_all(['section', 'div']):
+        if node.find(['h1', 'h2', 'h3']) and len(str(node)) < 28000:
+            markup = str(node)
+            if markup not in out['layouts']:
+                out['layouts'].append(markup)
+        if len(out['layouts']) >= 3:
+            break
+
+    for node in root_soup.find_all(['svg', 'img']):
+        if node.name == 'svg' and len(str(node)) < 5000:
+            out['icons'].append(str(node))
+        if len(out['icons']) >= 12:
+            break
+
+    return out
+
+
+def _build_state_mirror_css(all_css: str) -> str:
+    mirrored: list[str] = []
+    for selector_blob, body in CSS_RULE_PATTERN.findall(all_css):
+        selector = selector_blob.strip()
+        if ':hover' in selector:
+            mirrored.append(selector.replace(':hover', '.ds-force-hover') + '{' + body + '}')
+        if ':focus-visible' in selector:
+            mirrored.append(selector.replace(':focus-visible', '.ds-force-focus-visible') + '{' + body + '}')
+        if ':focus' in selector and ':focus-visible' not in selector:
+            mirrored.append(selector.replace(':focus', '.ds-force-focus') + '{' + body + '}')
+        if ':active' in selector:
+            mirrored.append(selector.replace(':active', '.ds-force-active') + '{' + body + '}')
+    return '\n'.join(mirrored)
 
 
 def _extract_context(bundle: dict) -> dict:
-    pages = bundle.get("pages", {})
-    css_links, css_chunks = _collect_css_sources(bundle)
-    all_css = "\n\n".join(css_chunks)
+    pages = bundle.get('pages', {})
+    css_links, css_chunks, script_links = _collect_css_sources(bundle)
+    all_css = '\n\n'.join(css_chunks)
+    rule_maps = _collect_rule_maps(all_css)
 
-    title = "Site"
-    root_page = pages.get(bundle.get("root_url", ""))
-    if root_page and root_page.get("title"):
-        title = root_page["title"]
+    title = 'Site'
+    root_page = pages.get(bundle.get('root_url', ''))
+    if root_page and root_page.get('title'):
+        title = root_page['title']
     elif pages:
-        title = next(iter(pages.values())).get("title") or title
+        title = next(iter(pages.values())).get('title') or title
 
-    soup_all = BeautifulSoup("\n".join(page.get("html", "") for page in pages.values()), "html.parser")
-    body_root = BeautifulSoup(root_page.get("html", "") if root_page else "", "html.parser")
+    soup_all = BeautifulSoup('\n'.join(page.get('html', '') for page in pages.values()), 'html.parser')
+    root_soup = BeautifulSoup(root_page.get('html', '') if root_page else '', 'html.parser')
 
-    tokens = {}
+    tokens: dict[str, dict] = {}
     for name, value in TOKEN_PATTERN.findall(all_css):
         if name not in tokens:
             clean_value = value.strip()
             tokens[name] = {
-                "value": clean_value,
-                "label": _infer_label(name),
-                "is_color": bool(COLOR_PATTERN.search(clean_value)),
+                'value': clean_value,
+                'label': _infer_label(name),
+                'is_color': bool(COLOR_PATTERN.search(clean_value)),
             }
 
-    colors = []
-    seen_colors = set()
-    for match in COLOR_PATTERN.finditer(all_css):
-        color = match.group(0).strip()
-        if color.lower() not in seen_colors:
-            seen_colors.add(color.lower())
-            colors.append(color)
-        if len(colors) >= 40:
+    colors: list[str] = []
+    seen_colors: set[str] = set()
+    for value in [meta['value'] for meta in tokens.values()] + [m.group(0) for m in COLOR_PATTERN.finditer(all_css)]:
+        if not COLOR_PATTERN.search(value):
+            continue
+        key = value.lower()
+        if key not in seen_colors:
+            seen_colors.add(key)
+            colors.append(value)
+        if len(colors) >= 48:
             break
 
-    keyframes = []
+    gradients: list[str] = []
+    seen_gradients: set[str] = set()
+    for match in GRADIENT_PATTERN.finditer(all_css):
+        value = match.group(0).strip()
+        if value not in seen_gradients:
+            seen_gradients.add(value)
+            gradients.append(value)
+        if len(gradients) >= 16:
+            break
+
+    keyframes: list[str] = []
     for block in KEYFRAME_BLOCK_PATTERN.findall(all_css):
         if block not in keyframes:
             keyframes.append(block)
-        if len(keyframes) >= 16:
+        if len(keyframes) >= 20:
             break
 
-    transitions = []
-    seen_transitions = set()
+    transitions: list[str] = []
+    seen_transitions: set[str] = set()
     for match in TRANSITION_PATTERN.finditer(all_css):
         value = match.group(0).strip()
         key = value[:220]
         if key not in seen_transitions:
             seen_transitions.add(key)
             transitions.append(value)
-        if len(transitions) >= 16:
+        if len(transitions) >= 20:
             break
 
-    breakpoints = []
-    seen_bp = set()
-    for bound, value in MEDIA_PATTERN.findall(all_css):
-        bp = f"{bound}-width: {value.strip()}"
-        if bp not in seen_bp:
-            seen_bp.add(bp)
-            breakpoints.append(bp)
-        if len(breakpoints) >= 12:
-            break
-
-    font_families = []
-    for match in re.finditer(r"font-family\s*:\s*([^;}{]+)", all_css):
-        value = match.group(1).strip()
-        if value not in font_families:
-            font_families.append(value)
-        if len(font_families) >= 10:
-            break
-
-    typography = []
-    samples = {
-        "h1": "Heading one sample",
-        "h2": "Heading two sample",
-        "h3": "Heading three sample",
-        "h4": "Heading four sample",
-        "p": "The quick brown fox jumps over the lazy dog.",
-        "a": "Link sample",
-        "button": "Button sample",
-        "span": "Label sample",
-    }
-    for tag_name in ["h1", "h2", "h3", "h4", "p", "a", "button", "span"]:
-        for el in soup_all.find_all(tag_name):
-            classes = " ".join(el.get("class", []))
-            text = el.get_text(" ", strip=True)
-            if not classes and not text:
-                continue
-            typography.append(
-                {
-                    "style": tag_name.upper() if tag_name.startswith("h") else tag_name.capitalize(),
-                    "tag": tag_name,
-                    "classes": classes,
-                    "sample": samples.get(tag_name, text[:60] or "Sample"),
-                    "source_text": text[:90],
-                }
-            )
-            break
-
-    components = []
-    seen_components = set()
-    component_queries = [
-        ("Navigation", lambda s: s.find("nav")),
-        ("Primary button", lambda s: s.find("button")),
-        ("Link / CTA", lambda s: s.find("a", href=True)),
-        (
-            "Card / tile",
-            lambda s: next(
-                (
-                    el
-                    for el in s.find_all(["div", "article", "a"])
-                    if any(k in " ".join(el.get("class", [])).lower() for k in ["card", "tile", "project", "case", "feature"])
-                    and len(str(el)) < 2500
-                ),
-                None,
-            ),
-        ),
-        (
-            "Hero block",
-            lambda s: next(
-                (
-                    el
-                    for el in s.find_all(["section", "header", "main", "div"])
-                    if len(el.get_text(" ", strip=True)) > 120 and len(str(el)) < 3500
-                ),
-                None,
-            ),
-        ),
-    ]
-    for label, finder in component_queries:
-        node = finder(body_root or soup_all)
-        if node is None:
-            continue
-        markup = str(node)
-        key = re.sub(r"\s+", " ", markup[:220])
-        if key in seen_components:
-            continue
-        seen_components.add(key)
-        components.append({"label": label, "markup": markup[:4000]})
-
+    components = _find_components(root_soup)
+    typography = _extract_typography(root_soup, rule_maps)
     class_counter = Counter()
     for el in soup_all.find_all(class_=True):
-        for cls in el.get("class", []):
+        for cls in el.get('class', []):
             class_counter[cls] += 1
 
-    nav_links = []
-    for a in body_root.find_all("a", href=True)[:12] if body_root else []:
-        text = a.get_text(" ", strip=True)
-        href = a.get("href")
-        if text and href:
-            nav_links.append({"text": text[:60], "href": href})
-
-    manifest = bundle.get("manifest", {})
+    manifest = bundle.get('manifest', {})
     return {
-        "title": title,
-        "css_links": css_links,
-        "all_css": all_css,
-        "tokens": tokens,
-        "colors": colors,
-        "keyframes": keyframes,
-        "transitions": transitions,
-        "breakpoints": breakpoints,
-        "font_families": font_families,
-        "typography": typography,
-        "components": components,
-        "pages": manifest.get("pages", []),
-        "nav_links": nav_links,
-        "top_classes": class_counter.most_common(18),
-        "root_markup": root_page.get("html", "") if root_page else "",
-        "page_count": manifest.get("page_count", len(pages)),
-        "asset_count": manifest.get("asset_count", len(bundle.get("resources", {}))),
-        "unresolved": manifest.get("unresolved_urls", []),
+        'title': title,
+        'prompt_text': PROMPT_TEXT,
+        'css_links': css_links,
+        'script_links': script_links,
+        'all_css': all_css,
+        'state_mirror_css': _build_state_mirror_css(all_css),
+        'tokens': tokens,
+        'colors': colors,
+        'gradients': gradients,
+        'keyframes': keyframes,
+        'transitions': transitions,
+        'typography': typography,
+        'components': components,
+        'pages': manifest.get('pages', []),
+        'top_classes': class_counter.most_common(24),
+        'hero_markup': _extract_hero_markup(root_soup),
+        'page_count': manifest.get('page_count', len(pages)),
+        'asset_count': manifest.get('asset_count', len(bundle.get('resources', {}))),
+        'unresolved': manifest.get('unresolved_urls', []),
     }
 
+
+def _render_states(markup: str, include_disabled: bool = True) -> str:
+    variants = []
+    states = [('Default', None), ('Hover', 'ds-force-hover'), ('Active', 'ds-force-active'), ('Focus', 'ds-force-focus')]
+    for label, state in states:
+        clone = BeautifulSoup(markup, 'html.parser')
+        target = clone.find(True)
+        if not target:
+            continue
+        if state:
+            target['class'] = list(target.get('class', [])) + [state]
+        variants.append(f"<article class='ds-state-card'><div class='ds-state-label'>{html.escape(label)}</div><div class='ds-state-preview'>{str(target)}</div></article>")
+    if include_disabled:
+        clone = BeautifulSoup(markup, 'html.parser')
+        target = clone.find(True)
+        if target and target.name in {'button', 'input', 'select', 'textarea'}:
+            target['disabled'] = 'disabled'
+            variants.append(f"<article class='ds-state-card'><div class='ds-state-label'>Disabled</div><div class='ds-state-preview'>{str(target)}</div></article>")
+    return ''.join(variants)
 
 
 def _render_local_design_system(ctx: dict) -> str:
-    css_tags = "\n".join(f'<link rel="stylesheet" href="{html.escape(h)}">' for h in ctx["css_links"])
-    token_rows = []
-    for name, meta in list(ctx["tokens"].items())[:120]:
-        swatch = (
-            f'<span class="ds-swatch" style="background:{html.escape(meta["value"])}"></span>'
-            if meta["is_color"]
-            else '<span class="ds-swatch ds-empty"></span>'
-        )
-        token_rows.append(
-            f"<tr><td><code>{html.escape(name)}</code></td><td>{html.escape(meta['label'])}</td>"
-            f"<td>{swatch}<code>{html.escape(meta['value'])}</code></td></tr>"
-        )
-    if not token_rows:
-        token_rows.append('<tr><td colspan="3">Nenhum token CSS custom property detectado.</td></tr>')
+    css_tags = '\n'.join(f'<link rel="stylesheet" href="{html.escape(h)}">' for h in ctx['css_links'])
+    script_tags = '\n'.join(f'<script src="{html.escape(h)}"></script>' for h in ctx['script_links'])
 
-    color_cards = []
-    for color in ctx["colors"][:32]:
-        color_cards.append(
-            f"<div class='ds-color-card'><div class='ds-color-sample' style='background:{html.escape(color)}'></div>"
-            f"<div class='ds-color-meta'><strong>{html.escape(color)}</strong><span>literal encontrado no CSS</span></div></div>"
-        )
-    if not color_cards:
-        color_cards.append("<div class='ds-empty-block'>Nenhuma cor literal detectada.</div>")
+    typography_rows = ''.join(
+        f"<article class='ds-type-row'><div class='ds-type-name'>{html.escape(item['label'])}</div><div class='ds-type-preview'>{item['markup']}</div><div class='ds-type-metric'>{html.escape(item['metric_label'])}</div></article>"
+        for item in ctx['typography']
+    ) or "<div class='ds-empty'>No typography evidence extracted.</div>"
 
-    typo_rows = []
-    for item in ctx["typography"]:
-        tag = item["tag"]
-        classes = item["classes"]
-        klass = f' class="{html.escape(classes)}"' if classes else ""
-        sample = html.escape(item["sample"])
-        preview = f"<{tag}{klass}>{sample}</{tag}>"
-        typo_rows.append(
-            f"<tr><td>{html.escape(item['style'])}</td><td><div class='ds-preview'>{preview}</div></td>"
-            f"<td><code>&lt;{tag}&gt;</code></td><td><code>{html.escape(classes or '—')}</code></td></tr>"
-        )
-    if not typo_rows:
-        typo_rows.append('<tr><td colspan="4">Sem evidência tipográfica suficiente nas páginas capturadas.</td></tr>')
+    token_rows = ''.join(
+        "<article class='ds-token'>"
+        + (f"<span class='ds-token-swatch' style='background:{html.escape(meta['value'])}'></span>" if meta['is_color'] else "<span class='ds-token-swatch ds-token-empty'></span>")
+        + f"<div class='ds-token-meta'><strong>{html.escape(meta['label'])}</strong><code>{html.escape(name)}</code><span>{html.escape(meta['value'])}</span></div></article>"
+        for name, meta in list(ctx['tokens'].items())[:80]
+    ) or "<div class='ds-empty'>No tokens found.</div>"
 
-    component_cards = []
-    for item in ctx["components"][:6]:
-        component_cards.append(
-            f"<article class='ds-component-card'><header><strong>{html.escape(item['label'])}</strong></header>"
-            f"<div class='ds-component-preview'>{item['markup']}</div>"
-            f"<details><summary>Markup</summary><pre>{html.escape(item['markup'])}</pre></details></article>"
-        )
-    if not component_cards:
-        component_cards.append("<div class='ds-empty-block'>Nenhum componente estrutural foi isolado.</div>")
+    gradient_rows = ''.join(
+        f"<article class='ds-token'><span class='ds-token-swatch' style='background:{html.escape(value)}'></span><div class='ds-token-meta'><strong>Gradient</strong><span>{html.escape(value)}</span></div></article>"
+        for value in ctx['gradients'][:12]
+    )
 
-    motion_blocks = []
-    for block in ctx["keyframes"][:12]:
-        motion_blocks.append(f"<pre>{html.escape(block)}</pre>")
-    for tr in ctx["transitions"][:12]:
-        motion_blocks.append(f"<pre>{html.escape(tr)}</pre>")
-    if not motion_blocks:
-        motion_blocks.append("<div class='ds-empty-block'>Nenhuma evidência de motion detectada.</div>")
+    button_states = ''.join(_render_states(markup, include_disabled=True) for markup in ctx['components']['buttons'][:3])
+    input_states = ''.join(_render_states(markup, include_disabled=True) for markup in ctx['components']['inputs'][:2])
+    card_states = ''.join(_render_states(markup, include_disabled=False) for markup in ctx['components']['cards'][:2])
+    layouts_markup = ''.join(f"<article class='ds-layout-pattern'>{markup}</article>" for markup in ctx['components']['layouts'][:3]) or "<div class='ds-empty'>No layout patterns recovered.</div>"
+    motion_markup = ''.join(f"<article class='ds-motion-card'><div class='ds-motion-preview'>{markup}</div></article>" for markup in (ctx['components']['buttons'][:2] + ctx['components']['cards'][:2])) or "<div class='ds-empty'>No motion gallery components isolated.</div>"
+    motion_specs = ''.join(f'<pre>{html.escape(block)}</pre>' for block in (ctx['keyframes'][:8] + ctx['transitions'][:8])) or "<div class='ds-empty'>No motion evidence found.</div>"
+    icons_markup = ''.join(f"<article class='ds-icon-card'>{markup}</article>" for markup in ctx['components']['icons'][:12])
 
-    pages_rows = []
-    for page in ctx["pages"]:
-        pages_rows.append(
-            f"<tr><td><code>{html.escape(page.get('local_path', ''))}</code></td>"
-            f"<td>{html.escape(page.get('title', ''))}</td><td><code>{html.escape(page.get('url', ''))}</code></td></tr>"
-        )
-    if not pages_rows:
-        pages_rows.append('<tr><td colspan="3">Nenhuma página listada no manifesto.</td></tr>')
+    nav_items = [('hero', 'Hero'), ('typography', 'Typography'), ('colors', 'Colors & Surfaces'), ('components', 'UI Components'), ('layout', 'Layout & Spacing'), ('motion', 'Motion & Interaction')]
+    if icons_markup:
+        nav_items.append(('icons', 'Icons'))
+    nav_html = ''.join(f'<a href="#{anchor}">{label}</a>' for anchor, label in nav_items)
 
-    class_rows = []
-    for cls, count in ctx["top_classes"]:
-        class_rows.append(f"<tr><td><code>.{html.escape(cls)}</code></td><td>{count}</td></tr>")
-    if not class_rows:
-        class_rows.append('<tr><td colspan="2">Nenhuma classe recorrente identificada.</td></tr>')
+    page_rows = ''.join(
+        f"<tr><td><code>{html.escape(page.get('local_path',''))}</code></td><td>{html.escape(page.get('title',''))}</td><td><code>{html.escape(page.get('url',''))}</code></td></tr>"
+        for page in ctx['pages']
+    ) or '<tr><td colspan="3">No pages in manifest.</td></tr>'
+    unresolved_list = ''.join(f'<li><code>{html.escape(url)}</code></li>' for url in ctx['unresolved'][:40]) or '<li>None</li>'
+    hero_markup = ctx['hero_markup'] or '<section><h1>Design System</h1><p>Hero evidence unavailable.</p></section>'
 
-    breakpoint_items = "".join(f"<li><code>{html.escape(bp)}</code></li>" for bp in ctx["breakpoints"]) or "<li>Sem media queries detectadas.</li>"
-    font_items = "".join(f"<li><code>{html.escape(font)}</code></li>" for font in ctx["font_families"]) or "<li>Sem fontes detectadas.</li>"
-    unresolved_list = "".join(f"<li><code>{html.escape(u)}</code></li>" for u in ctx["unresolved"][:50]) or "<li>Sem referências remotas pendentes.</li>"
-
-    return f"""<!DOCTYPE html>
+    return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Design System — {html.escape(ctx['title'])}</title>
 {css_tags}
+{script_tags}
 <style>
-:root {{
-  --ds-bg:#f5f7fb;
-  --ds-surface:#ffffff;
-  --ds-surface-2:#eef2f8;
-  --ds-border:#d9e0ea;
-  --ds-text:#10131a;
-  --ds-muted:#516072;
-  --ds-accent:#245bff;
-  --ds-shadow:0 12px 40px rgba(16,19,26,.08);
-  --ds-radius:18px;
-  --ds-radius-sm:12px;
-  --ds-max:1280px;
+{ctx['all_css']}
+{ctx['state_mirror_css']}
+html {{ scroll-behavior: smooth; }}
+body {{ margin:0; }}
+.ds-topnav {{ position:sticky; top:0; z-index:999; display:flex; gap:12px; flex-wrap:wrap; padding:14px 20px; backdrop-filter:blur(20px); background:rgba(255,255,255,.72); border-bottom:1px solid rgba(0,0,0,.08); }}
+.ds-topnav a {{ text-decoration:none; }}
+.ds-doc-frame {{ width:min(100% - 48px, 1440px); margin:0 auto; padding:56px 0; }}
+.ds-doc-header {{ display:grid; gap:16px; margin-bottom:28px; }}
+.ds-doc-header h2, .ds-doc-header p {{ margin:0; }}
+.ds-spec-list {{ display:grid; gap:12px; }}
+.ds-type-row {{ display:grid; grid-template-columns:minmax(120px, 220px) minmax(0,1fr) 140px; gap:20px; align-items:center; padding:16px 0; border-top:1px solid rgba(0,0,0,.08); }}
+.ds-type-row:last-child {{ border-bottom:1px solid rgba(0,0,0,.08); }}
+.ds-type-name, .ds-type-metric {{ font-size:12px; letter-spacing:.06em; text-transform:uppercase; opacity:.72; }}
+.ds-type-metric {{ text-align:right; }}
+.ds-token-grid, .ds-state-grid, .ds-layout-grid, .ds-icon-grid {{ display:grid; gap:16px; grid-template-columns:repeat(12,minmax(0,1fr)); }}
+.ds-token, .ds-state-card, .ds-layout-pattern, .ds-icon-card, .ds-motion-card {{ border:1px solid rgba(0,0,0,.08); border-radius:16px; overflow:hidden; padding:16px; }}
+.ds-token {{ grid-column:span 3; display:flex; gap:12px; align-items:center; min-height:88px; }}
+.ds-token-swatch {{ width:56px; height:56px; border-radius:14px; display:block; border:1px solid rgba(0,0,0,.08); flex:none; }}
+.ds-token-empty {{ background:repeating-linear-gradient(45deg, rgba(0,0,0,.04), rgba(0,0,0,.04) 6px, rgba(0,0,0,.08) 6px, rgba(0,0,0,.08) 12px); }}
+.ds-token-meta {{ display:flex; flex-direction:column; gap:4px; min-width:0; }}
+.ds-token-meta code, .ds-token-meta span {{ overflow-wrap:anywhere; }}
+.ds-state-card, .ds-motion-card {{ grid-column:span 3; }}
+.ds-layout-pattern {{ grid-column:span 4; }}
+.ds-icon-card {{ grid-column:span 2; display:flex; align-items:center; justify-content:center; min-height:120px; }}
+.ds-state-label {{ margin-bottom:12px; font-size:12px; letter-spacing:.06em; text-transform:uppercase; opacity:.72; }}
+.ds-state-preview, .ds-motion-preview {{ min-height:64px; display:flex; align-items:center; }}
+.ds-motion-specs {{ display:grid; gap:12px; margin-top:20px; }}
+.ds-motion-specs pre {{ margin:0; padding:14px; border:1px solid rgba(0,0,0,.08); border-radius:14px; overflow:auto; }}
+.ds-empty {{ padding:16px; border:1px dashed rgba(0,0,0,.18); border-radius:16px; opacity:.72; }}
+.ds-integrity table {{ width:100%; border-collapse:collapse; }}
+.ds-integrity td, .ds-integrity th {{ padding:12px 10px; border-top:1px solid rgba(0,0,0,.08); text-align:left; vertical-align:top; }}
+@media (max-width: 1100px) {{
+  .ds-token, .ds-state-card, .ds-motion-card {{ grid-column:span 6; }}
+  .ds-layout-pattern {{ grid-column:span 12; }}
+  .ds-icon-card {{ grid-column:span 3; }}
 }}
-html,body {{ margin:0; padding:0; background:var(--ds-bg); color:var(--ds-text); font-family:Inter, system-ui, sans-serif; }}
-a {{ color:inherit; }}
-.ds-doc * {{ box-sizing:border-box; }}
-.ds-doc {{ width:min(100% - 32px, var(--ds-max)); margin:0 auto; padding:32px 0 80px; }}
-.ds-hero {{ background:linear-gradient(180deg, #fff 0%, #f7f9fc 100%); border:1px solid var(--ds-border); border-radius:28px; padding:32px; box-shadow:var(--ds-shadow); margin-bottom:24px; }}
-.ds-hero h1 {{ margin:0 0 12px; font-size:clamp(32px, 4vw, 54px); line-height:1; letter-spacing:-.04em; }}
-.ds-hero p {{ margin:0; color:var(--ds-muted); max-width:900px; line-height:1.65; }}
-.ds-grid {{ display:grid; gap:20px; grid-template-columns:repeat(12, minmax(0,1fr)); }}
-.ds-panel {{ grid-column:span 12; background:var(--ds-surface); border:1px solid var(--ds-border); border-radius:var(--ds-radius); box-shadow:var(--ds-shadow); padding:24px; overflow:hidden; }}
-.ds-panel.half {{ grid-column:span 6; }}
-.ds-panel.third {{ grid-column:span 4; }}
-@media (max-width: 980px) {{ .ds-panel.half, .ds-panel.third {{ grid-column:span 12; }} }}
-.ds-eyebrow {{ display:inline-block; font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ds-accent); margin-bottom:10px; font-weight:700; }}
-.ds-panel h2 {{ margin:0 0 12px; font-size:24px; letter-spacing:-.03em; }}
-.ds-panel p.lead {{ margin:0 0 16px; color:var(--ds-muted); line-height:1.65; }}
-.ds-metrics {{ display:flex; flex-wrap:wrap; gap:12px; margin-top:18px; }}
-.ds-metric {{ border:1px solid var(--ds-border); background:var(--ds-surface-2); border-radius:999px; padding:10px 14px; font-size:13px; }}
-.ds-table {{ width:100%; border-collapse:collapse; }}
-.ds-table th, .ds-table td {{ border-top:1px solid var(--ds-border); padding:12px 10px; vertical-align:top; text-align:left; font-size:13px; }}
-.ds-table th {{ color:var(--ds-muted); font-size:11px; letter-spacing:.12em; text-transform:uppercase; }}
-.ds-table code {{ font-family:ui-monospace, SFMono-Regular, monospace; font-size:12px; word-break:break-word; }}
-.ds-swatch {{ width:14px; height:14px; border-radius:999px; display:inline-block; vertical-align:middle; margin-right:8px; border:1px solid rgba(0,0,0,.08); }}
-.ds-swatch.ds-empty {{ background:repeating-linear-gradient(45deg, #f1f4f8, #f1f4f8 4px, #e2e8f0 4px, #e2e8f0 8px); }}
-.ds-colors {{ display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px; }}
-.ds-color-card {{ border:1px solid var(--ds-border); border-radius:16px; overflow:hidden; background:var(--ds-surface); }}
-.ds-color-sample {{ aspect-ratio:16/10; width:100%; }}
-.ds-color-meta {{ padding:12px; display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--ds-muted); }}
-.ds-preview {{ padding:16px; border:1px dashed var(--ds-border); border-radius:12px; background:#fff; min-width:240px; }}
-.ds-component-list {{ display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px; }}
-.ds-component-card {{ border:1px solid var(--ds-border); border-radius:16px; background:var(--ds-surface); overflow:hidden; }}
-.ds-component-card header {{ padding:14px 16px; border-bottom:1px solid var(--ds-border); font-size:13px; }}
-.ds-component-preview {{ padding:16px; max-height:420px; overflow:auto; background:#fff; }}
-.ds-component-card details {{ border-top:1px solid var(--ds-border); padding:12px 16px; }}
-.ds-component-card pre, .ds-motion pre {{ white-space:pre-wrap; word-break:break-word; margin:0; font-size:11px; line-height:1.5; font-family:ui-monospace, monospace; }}
-.ds-motion {{ display:grid; gap:12px; }}
-.ds-empty-block {{ border:1px dashed var(--ds-border); background:var(--ds-surface-2); border-radius:16px; padding:20px; color:var(--ds-muted); }}
-.ds-lists {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }}
-@media (max-width: 760px) {{ .ds-lists {{ grid-template-columns:1fr; }} }}
-.ds-lists ul {{ margin:0; padding-left:18px; color:var(--ds-muted); line-height:1.6; }}
-.ds-footer-note {{ margin-top:24px; color:var(--ds-muted); font-size:12px; }}
+@media (max-width: 760px) {{
+  .ds-doc-frame {{ width:min(100% - 24px, 1440px); padding:40px 0; }}
+  .ds-type-row {{ grid-template-columns:1fr; gap:10px; }}
+  .ds-type-metric {{ text-align:left; }}
+  .ds-token, .ds-state-card, .ds-layout-pattern, .ds-icon-card, .ds-motion-card {{ grid-column:span 12; }}
+}}
 </style>
 </head>
 <body>
-<div class="ds-doc">
-  <section class="ds-hero">
-    <span class="ds-eyebrow">Design System Evidence Pack</span>
-    <h1>{html.escape(ctx['title'])}</h1>
-    <p>This document is derived from the captured pages, local CSS and captured assets. It documents what was actually found in the exported site bundle, not an invented redesign.</p>
-    <div class="ds-metrics">
-      <div class="ds-metric">Pages captured: <strong>{ctx['page_count']}</strong></div>
-      <div class="ds-metric">Assets captured: <strong>{ctx['asset_count']}</strong></div>
-      <div class="ds-metric">CSS vars: <strong>{len(ctx['tokens'])}</strong></div>
-      <div class="ds-metric">Literal colors: <strong>{len(ctx['colors'])}</strong></div>
-      <div class="ds-metric">Keyframes: <strong>{len(ctx['keyframes'])}</strong></div>
-      <div class="ds-metric">Pending remotes: <strong>{len(ctx['unresolved'])}</strong></div>
-    </div>
-  </section>
-
-  <section class="ds-grid">
-    <article class="ds-panel half">
-      <span class="ds-eyebrow">01 — Tokens</span>
-      <h2>CSS custom properties</h2>
-      <p class="lead">Exact custom properties extracted from the captured CSS set.</p>
-      <table class="ds-table"><thead><tr><th>Name</th><th>Label</th><th>Value</th></tr></thead><tbody>{''.join(token_rows)}</tbody></table>
-    </article>
-
-    <article class="ds-panel half">
-      <span class="ds-eyebrow">02 — Structure</span>
-      <h2>Coverage and layout evidence</h2>
-      <div class="ds-lists">
-        <div>
-          <h3>Breakpoints</h3>
-          <ul>{breakpoint_items}</ul>
-        </div>
-        <div>
-          <h3>Font families</h3>
-          <ul>{font_items}</ul>
-        </div>
-      </div>
-      <div class="ds-footer-note">Top recurring classes are listed below to show where the visual system concentrates its selectors.</div>
-      <table class="ds-table"><thead><tr><th>Class</th><th>Occurrences</th></tr></thead><tbody>{''.join(class_rows)}</tbody></table>
-    </article>
-
-    <article class="ds-panel">
-      <span class="ds-eyebrow">03 — Colors</span>
-      <h2>Literal color evidence</h2>
-      <p class="lead">These swatches come from exact CSS values detected in the local bundle.</p>
-      <div class="ds-colors">{''.join(color_cards)}</div>
-    </article>
-
-    <article class="ds-panel">
-      <span class="ds-eyebrow">04 — Typography</span>
-      <h2>Type styles in context</h2>
-      <table class="ds-table"><thead><tr><th>Style</th><th>Live preview</th><th>Element</th><th>Classes</th></tr></thead><tbody>{''.join(typo_rows)}</tbody></table>
-    </article>
-
-    <article class="ds-panel">
-      <span class="ds-eyebrow">05 — Components</span>
-      <h2>Recovered structural components</h2>
-      <p class="lead">Previews use markup recovered from the captured pages and the original local CSS assets.</p>
-      <div class="ds-component-list">{''.join(component_cards)}</div>
-    </article>
-
-    <article class="ds-panel half">
-      <span class="ds-eyebrow">06 — Motion</span>
-      <h2>Animations and transitions</h2>
-      <div class="ds-motion">{''.join(motion_blocks)}</div>
-    </article>
-
-    <article class="ds-panel half">
-      <span class="ds-eyebrow">07 — Pages</span>
-      <h2>Local route map</h2>
-      <table class="ds-table"><thead><tr><th>Local path</th><th>Title</th><th>Original URL</th></tr></thead><tbody>{''.join(pages_rows)}</tbody></table>
-    </article>
-
-    <article class="ds-panel">
-      <span class="ds-eyebrow">08 — Integrity</span>
-      <h2>Remaining unresolved remote references</h2>
-      <p class="lead">This is the explicit gap list. If this section is empty, the local package is substantially more self-contained.</p>
-      <ul>{unresolved_list}</ul>
-    </article>
-  </section>
-</div>
+<nav class="ds-topnav">{nav_html}</nav>
+<section id="hero">{hero_markup}</section>
+<section id="typography"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Typography</h2><p>Exact elements and classes found in the captured HTML, ordered as requested. Metrics are inferred from the captured CSS bundle.</p></header><div class="ds-spec-list">{typography_rows}</div></div></section>
+<section id="colors"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Colors &amp; Surfaces</h2><p>Backgrounds, borders, gradients and surfaces extracted from the actual bundle. No invented palette.</p></header><div class="ds-token-grid">{token_rows}</div><div class="ds-token-grid">{gradient_rows}</div></div></section>
+<section id="components"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>UI Components</h2><p>States are mirrored from the original pseudo-state selectors. The styling is reused from the captured CSS and classes.</p></header><div class="ds-state-grid">{button_states}{input_states}{card_states}</div></div></section>
+<section id="layout"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Layout &amp; Spacing</h2><p>Real layout patterns from the site. This section reuses actual wrappers instead of redrawing a fake grid.</p></header><div class="ds-layout-grid">{layouts_markup}</div></div></section>
+<section id="motion"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Motion &amp; Interaction</h2><p>Animation classes, transitions and interaction states from the original CSS. The gallery below reuses live markup.</p></header><div class="ds-state-grid">{motion_markup}</div><div class="ds-motion-specs">{motion_specs}</div></div></section>
+{f'<section id="icons"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Icons</h2><p>Exact icon style and markup recovered from the captured HTML.</p></header><div class="ds-icon-grid">{icons_markup}</div></div></section>' if icons_markup else ''}
+<section><div class="ds-doc-frame ds-integrity"><header class="ds-doc-header"><h2>Integrity</h2><p>Coverage evidence for the exported site package.</p></header><table><thead><tr><th>Local path</th><th>Title</th><th>Original URL</th></tr></thead><tbody>{page_rows}</tbody></table><div><h3>Pending remote references</h3><ul>{unresolved_list}</ul></div><details><summary>Prompt used to organize this design system</summary><pre>{html.escape(ctx['prompt_text'])}</pre></details></div></section>
 </body>
-</html>"""
-
+</html>'''
 
 
 def generate_design_system(source) -> str:
     if isinstance(source, str):
         bundle = {
-            "root_url": "https://captured.local",
-            "pages": {"https://captured.local": {"local_path": "index.html", "html": source, "title": "Captured page"}},
-            "resources": {},
-            "manifest": {"pages": [{"local_path": "index.html", "url": "https://captured.local", "title": "Captured page"}]},
+            'root_url': 'https://captured.local',
+            'pages': {'https://captured.local': {'local_path': 'index.html', 'html': source, 'title': 'Captured page'}},
+            'resources': {},
+            'manifest': {'pages': [{'local_path': 'index.html', 'url': 'https://captured.local', 'title': 'Captured page'}]},
         }
     else:
         bundle = source
 
     ctx = _extract_context(bundle)
 
-    if DESIGN_SYSTEM_MODE in {"auto", "llm"} and ANTHROPIC_API_KEY:
+    if DESIGN_SYSTEM_MODE in {'auto', 'llm'} and ANTHROPIC_API_KEY:
         llm_html = _call_claude_api(
-            "You transform structured site evidence into a rigorous design-system.html document. Output HTML only.",
+            'Return a complete design-system.html document only. Preserve exact classes, assets and layout patterns from the provided site evidence. Never invent tokens or components.',
             json.dumps(
                 {
-                    "title": ctx["title"],
-                    "page_count": ctx["page_count"],
-                    "asset_count": ctx["asset_count"],
-                    "tokens": ctx["tokens"],
-                    "colors": ctx["colors"],
-                    "keyframes": ctx["keyframes"],
-                    "breakpoints": ctx["breakpoints"],
-                    "typography": ctx["typography"],
-                    "pages": ctx["pages"],
-                    "top_classes": ctx["top_classes"],
-                    "unresolved": ctx["unresolved"],
+                    'prompt': ctx['prompt_text'],
+                    'title': ctx['title'],
+                    'page_count': ctx['page_count'],
+                    'asset_count': ctx['asset_count'],
+                    'tokens': ctx['tokens'],
+                    'colors': ctx['colors'],
+                    'gradients': ctx['gradients'],
+                    'keyframes': ctx['keyframes'],
+                    'transitions': ctx['transitions'],
+                    'typography': ctx['typography'],
+                    'components': ctx['components'],
+                    'pages': ctx['pages'],
+                    'unresolved': ctx['unresolved'],
+                    'hero_markup': ctx['hero_markup'],
+                    'css_links': ctx['css_links'],
+                    'script_links': ctx['script_links'],
                 },
                 ensure_ascii=False,
             ),
         )
-        if llm_html and llm_html.lstrip().startswith("<!DOCTYPE html>"):
+        if llm_html and llm_html.lstrip().startswith('<!DOCTYPE html>'):
             return llm_html
 
     return _render_local_design_system(ctx)

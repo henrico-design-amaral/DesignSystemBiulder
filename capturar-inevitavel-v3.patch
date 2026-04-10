@@ -1,0 +1,3231 @@
+diff -ruN /mnt/data/origv2/src/.dockerignore /mnt/data/projectv2/src/.dockerignore
+--- /mnt/data/origv2/src/.dockerignore	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/.dockerignore	2026-04-10 20:58:41.000000000 +0000
+@@ -0,0 +1,12 @@
++.git
++.github
++.venv
++venv
++__pycache__
++*.pyc
++*.pyo
++*.pyd
++*.log
++downloads
++*.zip
++.env
+diff -ruN /mnt/data/origv2/src/.env.example /mnt/data/projectv2/src/.env.example
+--- /mnt/data/origv2/src/.env.example	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/.env.example	2026-04-10 22:09:48.000000000 +0000
+@@ -0,0 +1,32 @@
++# Core runtime
++PORT=8080
++DOWNLOAD_RETENTION_SECONDS=600
++MAX_CONCURRENT_JOBS=2
++MAX_URL_LENGTH=2048
++
++# Rate limiting
++RATE_LIMIT_WINDOW_SECONDS=60
++RATE_LIMIT_MAX_REQUESTS=5
++
++# Capture limits
++MAX_ASSET_BYTES=26214400
++MAX_CAPTURED_RESOURCES=900
++MAX_CRAWL_PAGES=14
++MAX_CRAWL_DEPTH=2
++MAX_CSS_IMPORT_DEPTH=4
++
++# Optional access control
++APP_API_TOKEN=
++ALLOWED_DOMAIN_SUFFIXES=
++DENIED_DOMAIN_SUFFIXES=localhost,local,internal,test,example,invalid
++
++# Optional design-system API
++DESIGN_SYSTEM_MODE=local
++ANTHROPIC_API_KEY=
++
++# Gunicorn
++GUNICORN_WORKERS=2
++GUNICORN_THREADS=4
++GUNICORN_TIMEOUT=240
++GUNICORN_GRACEFUL_TIMEOUT=30
++LOG_LEVEL=info
+diff -ruN /mnt/data/origv2/src/.gitignore /mnt/data/projectv2/src/.gitignore
+--- /mnt/data/origv2/src/.gitignore	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/.gitignore	2026-04-10 01:16:41.000000000 +0000
+@@ -0,0 +1,30 @@
++# Python
++__pycache__/
++*.py[cod]
++*.pyo
++.env
++.venv
++venv/
++*.egg-info/
++dist/
++build/
++
++# uv
++.python-version
++uv.lock
++
++# Downloads temporários (nunca commitar)
++downloads/
++*.zip
++
++# IDEs
++.vscode/
++.idea/
++*.swp
++
++# macOS
++.DS_Store
++Thumbs.db
++
++# Logs
++*.log
+diff -ruN /mnt/data/origv2/src/Dockerfile /mnt/data/projectv2/src/Dockerfile
+--- /mnt/data/origv2/src/Dockerfile	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/Dockerfile	2026-04-10 20:58:41.000000000 +0000
+@@ -0,0 +1,45 @@
++FROM python:3.12-slim
++
++ENV PYTHONDONTWRITEBYTECODE=1 \
++    PYTHONUNBUFFERED=1 \
++    PIP_NO_CACHE_DIR=1 \
++    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
++
++RUN apt-get update && apt-get install -y --no-install-recommends \
++    ca-certificates \
++    curl \
++    fonts-liberation \
++    gnupg \
++    libcairo2 \
++    libasound2 \
++    libatk-bridge2.0-0 \
++    libatk1.0-0 \
++    libcups2 \
++    libdbus-1-3 \
++    libgbm1 \
++    libglib2.0-0 \
++    libnspr4 \
++    libnss3 \
++    libpango-1.0-0 \
++    libx11-6 \
++    libx11-xcb1 \
++    libxcb1 \
++    libxcomposite1 \
++    libxdamage1 \
++    libxext6 \
++    libxfixes3 \
++    libxkbcommon0 \
++    libxrandr2 \
++    xdg-utils \
++    && rm -rf /var/lib/apt/lists/*
++
++WORKDIR /app
++
++COPY requirements.txt .
++RUN pip install --upgrade pip && pip install -r requirements.txt
++RUN playwright install chromium --with-deps
++
++COPY . .
++RUN mkdir -p /app/downloads
++
++CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --worker-class gthread --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-240} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT:-30} --log-level ${LOG_LEVEL:-info}"]
+diff -ruN /mnt/data/origv2/src/README.md /mnt/data/projectv2/src/README.md
+--- /mnt/data/origv2/src/README.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/README.md	2026-04-10 22:09:58.000000000 +0000
+@@ -0,0 +1,150 @@
++# Capturar
++
++Ferramenta web para capturar páginas públicas e gerar um pacote offline com `index.html`, assets locais e, quando disponível, `design-system.html`.
++
++## O que esta versão faz de verdade
++
++- Renderiza a página com Playwright + Chromium.
++- Rola a página para tentar acionar lazy loading.
++- Reescreve referências do HTML e `url(...)` de CSS inline e CSS baixado.
++- Empacota a captura em ZIP.
++- Gera um `design-system.html` por fallback local e, opcionalmente, por API externa quando `ANTHROPIC_API_KEY` estiver configurada.
++
++## Limites reais
++
++- Não suporta login, sessão autenticada ou navegação multi-step.
++- Não é um espelho perfeito de qualquer SPA complexa.
++- Alguns sites podem manter dependências remotas ou quebrar interações avançadas offline.
++- Destinos privados, locais ou reservados são bloqueados por segurança.
++
++## Stack
++
++- Backend: Flask + Gunicorn
++- Captura: Playwright + Chromium
++- Parsing: BeautifulSoup
++- Deploy: Docker + Railway
++
++## Rodar localmente
++
++### Com `uv`
++
++```bash
++git clone <seu-repo>
++cd capturar
++uv sync
++uv run playwright install chromium
++uv run python app.py
++```
++
++Acesse: `http://localhost:8080`
++
++### Com `pip`
++
++```bash
++pip install -r requirements.txt
++playwright install chromium
++python app.py
++```
++
++### Com Docker
++
++```bash
++docker build -t capturar .
++docker run --rm -p 8080:8080 capturar
++```
++
++## Variáveis de ambiente
++
++Copie `.env.example` como base. As mais importantes:
++
++```bash
++PORT=8080
++DOWNLOAD_RETENTION_SECONDS=600
++MAX_CONCURRENT_JOBS=2
++RATE_LIMIT_WINDOW_SECONDS=60
++RATE_LIMIT_MAX_REQUESTS=5
++MAX_ASSET_BYTES=26214400
++MAX_CAPTURED_RESOURCES=600
++APP_API_TOKEN=
++ALLOWED_DOMAIN_SUFFIXES=
++DENIED_DOMAIN_SUFFIXES=localhost,local,internal,test,example,invalid
++DESIGN_SYSTEM_MODE=auto
++ANTHROPIC_API_KEY=
++```
++
++### Recomendações para produção
++
++- Defina `APP_API_TOKEN` se o serviço não for público.
++- Use `ALLOWED_DOMAIN_SUFFIXES` se quiser restringir a captura a domínios confiáveis.
++- Configure `ANTHROPIC_API_KEY` apenas se quiser tentar geração externa do design system.
++- Mantenha `DESIGN_SYSTEM_MODE=fallback` se quiser previsibilidade e custo zero de API.
++
++## Deploy no Railway
++
++### Via GitHub
++
++1. Suba este projeto em um repositório Git.
++2. No Railway, crie um novo serviço apontando para o repositório.
++3. O Railway usará o `Dockerfile` deste projeto.
++4. Configure pelo menos estas variáveis:
++   - `PORT=8080`
++   - `APP_API_TOKEN` opcional
++   - `ANTHROPIC_API_KEY` opcional
++5. Confirme que o healthcheck está em `/healthz`.
++
++### Via CLI
++
++```bash
++railway up
++```
++
++## Estrutura do projeto
++
++```text
++capturar/
++├── app.py
++├── downloader.py
++├── design_system_generator.py
++├── templates/
++│   └── index.html
++├── downloads/
++├── Dockerfile
++├── railway.toml
++├── requirements.txt
++├── .env.example
++└── .dockerignore
++```
++
++## Melhorias aplicadas nesta revisão
++
++- bloqueio de SSRF básico para destinos privados/locais
++- rate limit em memória
++- limitação de concorrência
++- limpeza automática de arquivos expirados
++- assets temporários em disco em vez de RAM
++- reescrita de `url(...)` também nos CSS baixados
++- rota dedicada para abrir `design-system.html`
++- frontend alinhado com os metadados reais do backend
++- documentação alinhada com o comportamento atual
++
++## Healthcheck
++
++`GET /healthz`
++
++Resposta esperada:
++
++```json
++{"status":"ok","active_capacity":2,"retention_seconds":600}
++```
++
++
++## Novos controles de captura
++
++- `MAX_CRAWL_PAGES`: limite de páginas same-origin por execução
++- `MAX_CRAWL_DEPTH`: profundidade máxima do crawl
++- `MAX_CSS_IMPORT_DEPTH`: profundidade de resolução de `@import` em CSS
++- `capture-manifest.json`: relatório explícito de páginas, assets e URLs remotas não resolvidas
++
++## Escopo real
++
++O projeto agora trabalha como **capturador de site same-origin**, não apenas snapshot de uma página. Ainda assim, sites autenticados, apps altamente dinâmicos e experiências dependentes de backend em tempo real podem não ficar idênticos no modo offline.
+Binary files /mnt/data/origv2/src/__pycache__/app.cpython-313.pyc and /mnt/data/projectv2/src/__pycache__/app.cpython-313.pyc differ
+Binary files /mnt/data/origv2/src/__pycache__/design_system_generator.cpython-313.pyc and /mnt/data/projectv2/src/__pycache__/design_system_generator.cpython-313.pyc differ
+Binary files /mnt/data/origv2/src/__pycache__/downloader.cpython-313.pyc and /mnt/data/projectv2/src/__pycache__/downloader.cpython-313.pyc differ
+diff -ruN /mnt/data/origv2/src/app.py /mnt/data/projectv2/src/app.py
+--- /mnt/data/origv2/src/app.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/app.py	2026-04-10 22:50:36.688718397 +0000
+@@ -0,0 +1,341 @@
++from __future__ import annotations
++
++import ipaddress
++import json
++import os
++import socket
++import threading
++import time
++import uuid
++from collections import defaultdict, deque
++from pathlib import Path
++from typing import Iterable
++from urllib.parse import urlparse
++
++from flask import Flask, Response, jsonify, render_template, request, send_file
++
++app = Flask(__name__)
++
++BASE_DIR = Path(__file__).resolve().parent
++DOWNLOADS_DIR = BASE_DIR / "downloads"
++DOWNLOADS_DIR.mkdir(exist_ok=True)
++
++RETENTION_SECONDS = max(60, int(os.getenv("DOWNLOAD_RETENTION_SECONDS", "600")))
++MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "2")))
++RATE_LIMIT_WINDOW_SECONDS = max(10, int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60")))
++RATE_LIMIT_MAX_REQUESTS = max(1, int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5")))
++MAX_URL_LENGTH = max(128, int(os.getenv("MAX_URL_LENGTH", "2048")))
++REQUIRE_API_TOKEN = os.getenv("APP_API_TOKEN", "").strip()
++ALLOWED_DOMAIN_SUFFIXES = {
++    item.strip().lower()
++    for item in os.getenv("ALLOWED_DOMAIN_SUFFIXES", "").split(",")
++    if item.strip()
++}
++DENIED_DOMAIN_SUFFIXES = {
++    item.strip().lower()
++    for item in os.getenv(
++        "DENIED_DOMAIN_SUFFIXES",
++        "localhost,local,internal,test,example,invalid",
++    ).split(",")
++    if item.strip()
++}
++
++_job_slots = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
++_rate_limit_lock = threading.Lock()
++_rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
++
++
++@app.after_request
++def add_security_headers(response):
++    response.headers["X-Content-Type-Options"] = "nosniff"
++    response.headers["Referrer-Policy"] = "no-referrer"
++    response.headers["X-Frame-Options"] = "DENY"
++    response.headers["Cache-Control"] = "no-store"
++    return response
++
++
++@app.route("/")
++def index():
++    return render_template("index.html")
++
++
++@app.route("/healthz")
++def health():
++    return jsonify(
++        {
++            "status": "ok",
++            "active_capacity": MAX_CONCURRENT_JOBS,
++            "retention_seconds": RETENTION_SECONDS,
++        }
++    )
++
++
++@app.route("/download")
++def download():
++    if REQUIRE_API_TOKEN:
++        provided_token = request.headers.get("X-API-Token", "").strip()
++        if provided_token != REQUIRE_API_TOKEN:
++            return _sse_error("Acesso não autorizado.", status=401)
++
++    if not _check_rate_limit(_client_ip()):
++        return _sse_error(
++            "Limite temporário de requisições atingido. Aguarde alguns instantes.",
++            status=429,
++        )
++
++    raw_url = request.args.get("url", "").strip()
++    if not raw_url:
++        return _sse_error("URL ausente.", status=400)
++
++    try:
++        normalized_url = _normalize_url(raw_url)
++    except ValueError as exc:
++        return _sse_error(str(exc), status=400)
++
++    validation_error = _validate_target_url(normalized_url)
++    if validation_error:
++        return _sse_error(validation_error, status=400)
++
++    if not _job_slots.acquire(blocking=False):
++        return _sse_error(
++            "Capacidade temporariamente esgotada. Tente novamente em instantes.",
++            status=429,
++        )
++
++    options = {
++        "js": request.args.get("js", "true") == "true",
++        "lazy": request.args.get("lazy", "true") == "true",
++        "clean": request.args.get("clean", "false") == "true",
++    }
++
++    job_id = str(uuid.uuid4())[:8]
++    zip_path = DOWNLOADS_DIR / f"{job_id}.zip"
++    design_system_path = DOWNLOADS_DIR / f"{job_id}.design-system.html"
++    started_at = time.monotonic()
++
++    def generate() -> Iterable[str]:
++        summary: dict | None = None
++
++        def emit(data: dict) -> str:
++            return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
++
++        try:
++            from downloader import download_site
++
++            yield emit(
++                {
++                    "type": "log",
++                    "msg": f"Iniciando captura de {normalized_url}",
++                    "level": "accent",
++                }
++            )
++            yield emit(
++                {
++                    "type": "log",
++                    "msg": (
++                        f"Opções: JS={options['js']} · Lazy={options['lazy']} · Preservar runtime={not options['clean']}"
++                    ),
++                }
++            )
++
++            for event in download_site(
++                normalized_url,
++                zip_path,
++                options,
++                design_system_output_path=design_system_path,
++            ):
++                if event.get("type") == "summary":
++                    summary = event
++                    continue
++                yield emit(event)
++
++            elapsed_ms = int((time.monotonic() - started_at) * 1000)
++            if zip_path.exists():
++                size = zip_path.stat().st_size
++                yield emit(
++                    {
++                        "type": "done",
++                        "filename": zip_path.name,
++                        "size": size,
++                        "files": summary.get("files") if summary else None,
++                        "pages": summary.get("pages") if summary else None,
++                        "unresolved": summary.get("unresolved") if summary else None,
++                        "elapsed": elapsed_ms,
++                        "downloadUrl": f"/file/{job_id}",
++                        "designSystemUrl": (
++                            f"/design-system/{job_id}"
++                            if design_system_path.exists()
++                            else None
++                        ),
++                    }
++                )
++            else:
++                yield emit({"type": "error", "msg": "Falha ao gerar o arquivo ZIP."})
++        except Exception as exc:  # pragma: no cover - defensive path
++            yield emit({"type": "error", "msg": str(exc)})
++        finally:
++            _job_slots.release()
++
++    return Response(
++        generate(),
++        mimetype="text/event-stream",
++        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
++    )
++
++
++@app.route("/file/<job_id>")
++def get_file(job_id):
++    safe_id = _safe_job_id(job_id)
++    zip_path = DOWNLOADS_DIR / f"{safe_id}.zip"
++    if not zip_path.exists():
++        return jsonify({"error": "Arquivo não encontrado ou expirado."}), 404
++    return send_file(zip_path, as_attachment=True, download_name=zip_path.name)
++
++
++@app.route("/design-system/<job_id>")
++def get_design_system(job_id):
++    safe_id = _safe_job_id(job_id)
++    html_path = DOWNLOADS_DIR / f"{safe_id}.design-system.html"
++    if not html_path.exists():
++        return jsonify({"error": "Design system não encontrado ou expirado."}), 404
++    return send_file(html_path, mimetype="text/html")
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++def _safe_job_id(job_id: str) -> str:
++    return "".join(c for c in job_id if c.isalnum() or c == "-")
++
++
++def _client_ip() -> str:
++    xff = request.headers.get("X-Forwarded-For", "")
++    if xff:
++        return xff.split(",")[0].strip()
++    return request.remote_addr or "unknown"
++
++
++
++def _check_rate_limit(client_ip: str) -> bool:
++    now = time.time()
++    with _rate_limit_lock:
++        bucket = _rate_limit_buckets[client_ip]
++        while bucket and now - bucket[0] > RATE_LIMIT_WINDOW_SECONDS:
++            bucket.popleft()
++        if len(bucket) >= RATE_LIMIT_MAX_REQUESTS:
++            return False
++        bucket.append(now)
++        return True
++
++
++
++def _normalize_url(url: str) -> str:
++    trimmed = url.strip()
++    if len(trimmed) > MAX_URL_LENGTH:
++        raise ValueError("URL longa demais.")
++    if not trimmed.startswith(("http://", "https://")):
++        trimmed = "https://" + trimmed
++    return trimmed
++
++
++
++def _validate_target_url(url: str) -> str | None:
++    try:
++        parsed = urlparse(url)
++    except Exception:
++        return "URL inválida."
++
++    if parsed.scheme not in {"http", "https"}:
++        return "Apenas URLs HTTP/HTTPS são suportadas."
++    if not parsed.netloc:
++        return "URL inválida."
++    if parsed.username or parsed.password:
++        return "URLs com credenciais embutidas não são permitidas."
++
++    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
++    if not hostname:
++        return "Hostname inválido."
++
++    if hostname in {"localhost", "127.0.0.1", "::1"}:
++        return "Destinos locais não são permitidos."
++
++    if hostname.endswith(".local"):
++        return "Destinos locais não são permitidos."
++
++    if ALLOWED_DOMAIN_SUFFIXES and not any(
++        hostname == suffix or hostname.endswith(f".{suffix}")
++        for suffix in ALLOWED_DOMAIN_SUFFIXES
++    ):
++        return "Este domínio não está autorizado neste ambiente."
++
++    if any(
++        hostname == suffix or hostname.endswith(f".{suffix}")
++        for suffix in DENIED_DOMAIN_SUFFIXES
++    ):
++        return "Este domínio não é permitido."
++
++    try:
++        ip = ipaddress.ip_address(hostname)
++        if _is_forbidden_ip(ip):
++            return "Destinos privados ou reservados não são permitidos."
++        return None
++    except ValueError:
++        pass
++
++    try:
++        addrinfo = socket.getaddrinfo(hostname, None)
++    except socket.gaierror:
++        return "Não foi possível resolver o domínio informado."
++
++    for _, _, _, _, sockaddr in addrinfo:
++        candidate_ip = sockaddr[0]
++        try:
++            ip = ipaddress.ip_address(candidate_ip)
++        except ValueError:
++            continue
++        if _is_forbidden_ip(ip):
++            return "Destinos privados ou reservados não são permitidos."
++
++    return None
++
++
++
++def _is_forbidden_ip(ip: ipaddress._BaseAddress) -> bool:
++    return any(
++        (
++            ip.is_private,
++            ip.is_loopback,
++            ip.is_link_local,
++            ip.is_multicast,
++            ip.is_reserved,
++            ip.is_unspecified,
++        )
++    )
++
++
++
++def _sse_error(message: str, status: int = 200) -> Response:
++    payload = json.dumps({"type": "error", "msg": message}, ensure_ascii=False)
++    return Response(f"data: {payload}\n\n", status=status, mimetype="text/event-stream")
++
++
++
++def cleanup_old_files() -> None:
++    while True:
++        now = time.time()
++        for file_path in DOWNLOADS_DIR.glob("*"):
++            try:
++                if now - file_path.stat().st_mtime > RETENTION_SECONDS:
++                    file_path.unlink(missing_ok=True)
++            except FileNotFoundError:
++                continue
++        time.sleep(60)
++
++
++threading.Thread(target=cleanup_old_files, daemon=True).start()
++
++
++if __name__ == "__main__":
++    port = int(os.environ.get("PORT", 8080))
++    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+diff -ruN /mnt/data/origv2/src/design_system_generator.py /mnt/data/projectv2/src/design_system_generator.py
+--- /mnt/data/origv2/src/design_system_generator.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/design_system_generator.py	2026-04-10 22:50:35.525793684 +0000
+@@ -0,0 +1,717 @@
++from __future__ import annotations
++
++import html
++import json
++import os
++import re
++import urllib.request
++from collections import Counter
++from pathlib import Path
++
++from bs4 import BeautifulSoup, NavigableString, Tag
++
++ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
++MODEL = "claude-sonnet-4-20250514"
++MAX_TOKENS = 8000
++DESIGN_SYSTEM_MODE = os.getenv("DESIGN_SYSTEM_MODE", "local").strip().lower()
++ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
++
++TOKEN_PATTERN = re.compile(r"(--[\w-]+)\s*:\s*([^;}{]+)")
++KEYFRAME_BLOCK_PATTERN = re.compile(r"@keyframes\s+[\w-]+\s*\{(?:[^{}]+|\{[^{}]*\})*\}", re.DOTALL)
++MEDIA_PATTERN = re.compile(r"@media\s*\((min|max)-width\s*:\s*([^\)]+)\)", re.IGNORECASE)
++COLOR_PATTERN = re.compile(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^\)]+\)|hsla?\([^\)]+\)|oklch\([^\)]+\)|color\([^\)]+\)")
++TRANSITION_PATTERN = re.compile(r"transition[^;]*:[^;]+;|animation[^;]*:[^;]+;|cubic-bezier\([^\)]+\)", re.IGNORECASE)
++CSS_RULE_PATTERN = re.compile(r"([^{}@]+)\{([^{}]+)\}")
++DECL_PATTERN = re.compile(r"([\w-]+)\s*:\s*([^;}{]+)")
++GRADIENT_PATTERN = re.compile(r"(?:linear|radial|conic)-gradient\([^\)]+\)", re.IGNORECASE)
++
++STYLE_ORDER = [
++    "Heading 1",
++    "Heading 2",
++    "Heading 3",
++    "Heading 4",
++    "Bold L",
++    "Bold M",
++    "Bold S",
++    "Paragraph",
++    "Regular L",
++    "Regular M",
++    "Regular S",
++]
++
++PROMPT_TEXT = """You are a Design System Showcase Builder.
++
++You are given a reference website HTML:
++$ARGUMENTS
++
++Your task is to create one new intermediate HTML file that acts as a living design system + pattern library for this exact design.
++
++GOAL
++
++Generate one single file called: design-system.html and place it in the same folder of the html file.
++
++This file must preserve the exact look & behavior of the reference design by reusing the original HTML, CSS classes, animations, keyframes, transitions, effects, and layout patterns — not approximations.
++
++HARD RULES (NON-NEGOTIABLE)
++
++Do not redesign or invent new styles.
++Reuse exact class names, animations, timing, easing, hover/focus states.
++Reference the same CSS/JS assets used by the original.
++If a style/component is not used in the reference HTML, do not add it.
++The file must be self-explanatory by structure (sections = documentation).
++Include a top horizontal nav with anchor links to each section.
++
++OBJECTIVE
++
++Build a single page composed of canonical examples of the design system, organized in sections.
++
++Hero (Exact Clone, Text Adapted)
++
++The first section MUST be a direct clone of the original Hero:
++
++• Same HTML structure
++• Same class names
++• Same layout
++• Same images and components
++• Same animations and interactions
++• Same buttons and background
++• Same UI components (if any)
++
++Allowed change (only this):
++
++• Replace the hero text content to present the Design System
++• Keep similar text length and hierarchy
++
++Forbidden:
++
++• Do not change layout, spacing, alignment, or animations
++• Do not add or remove elements
++
++Typography
++
++Create a Typography section rendered as a spec table / vertical list.
++
++Each row MUST contain:
++
++• Style name (e.g. “Heading 1”, “Bold M”)
++• Live text preview using the exact original HTML element and CSS classes
++• Font size / line-height label aligned right (format: 40px / 48px)
++
++Include ONLY styles that exist in the reference HTML, in this order:
++
++• Heading 1
++• Heading 2
++• Heading 3
++• Heading 4
++• Bold L / Bold M / Bold S
++• Paragraph (larger body, if exists)
++• Regular L / Regular M / Regular S
++
++Rules:
++
++• No inline styles
++• No normalization
++• Typography, colors, spacing, and gradients MUST come from original CSS
++• If a style uses gradient text, show it exactly the same
++• If a style does not exist, DO NOT include it
++
++This section must communicate hierarchy, scale, and rhythm at a glance.
++
++Colors & Surfaces
++
++• Backgrounds (page, section, card, glass/blur if exists)
++• Borders, dividers, overlays
++• Gradients (as swatches + usage context)
++
++UI Components
++
++• Buttons, inputs, cards, etc. (only those that exist)
++• Show states side-by-side: default / hover / active / focus / disabled
++• Inputs only if present (default/focus/error if applicable)
++
++Layout & Spacing
++
++• Containers, grids, columns, section paddings
++• Show 2–3 real layout patterns from the reference (hero layout, grid, split)
++
++Motion & Interaction
++
++Show all motion behaviors present:
++
++• Entrance animations (if any)
++• Hover lifts/glows
++• Button hover transitions
++• Scroll/reveal behavior (only if present)
++
++Include a small Motion Gallery demonstrating each animation class.
++
++Icons
++
++If the reference uses icons:
++
++• Display the same icon style/system
++• Show size variants and color inheritance
++• Use the same markup and classes
++
++If icons are not present, omit this section entirely."""
++
++SEMANTIC_MAP = [
++    (r"brand|primary|accent|highlight", "Brand Primary"),
++    (r"secondary", "Secondary"),
++    (r"plum|purple|violet|indigo", "Brand Purple"),
++    (r"gold|amber|yellow", "Accent Gold"),
++    (r"rose|pink|red|danger|error", "Danger"),
++    (r"green|success|emerald|teal", "Success"),
++    (r"blue|sky|cyan|info", "Info"),
++    (r"ink|text|fg|foreground|copy", "Text"),
++    (r"muted|soft|dim|subtle|faint", "Text Muted"),
++    (r"bg|background|surface|canvas|base", "Background"),
++    (r"card|panel|layer|glass", "Surface Card"),
++    (r"stone|neutral|gray|grey|slate", "Neutral"),
++    (r"border|divider|separator|stroke", "Border"),
++    (r"white", "White"),
++    (r"black", "Black"),
++    (r"shadow|overlay|scrim", "Shadow Overlay"),
++]
++
++
++def _infer_label(var_name: str) -> str:
++    name = var_name.strip("-").lower()
++    for pattern, label in SEMANTIC_MAP:
++        if re.search(pattern, name):
++            return label
++    return var_name.strip("-").replace("-", " ").title()
++
++
++def _call_claude_api(system: str, user: str) -> str | None:
++    if DESIGN_SYSTEM_MODE not in {"auto", "llm"} or not ANTHROPIC_API_KEY:
++        return None
++
++    payload = json.dumps(
++        {
++            "model": MODEL,
++            "max_tokens": MAX_TOKENS,
++            "system": system,
++            "messages": [{"role": "user", "content": user[:180000]}],
++        }
++    ).encode("utf-8")
++
++    req = urllib.request.Request(
++        ANTHROPIC_API_URL,
++        data=payload,
++        headers={
++            "Content-Type": "application/json",
++            "anthropic-version": "2023-06-01",
++            "x-api-key": ANTHROPIC_API_KEY,
++        },
++        method="POST",
++    )
++    try:
++        with urllib.request.urlopen(req, timeout=90) as resp:
++            data = json.loads(resp.read().decode("utf-8"))
++        for block in data.get("content", []):
++            if block.get("type") == "text":
++                return block.get("text")
++    except Exception:
++        return None
++    return None
++
++
++def _parse_inline_style(style_text: str) -> dict[str, str]:
++    values: dict[str, str] = {}
++    for name, value in DECL_PATTERN.findall(style_text or ""):
++        values[name.strip().lower()] = value.strip()
++    return values
++
++
++def _collect_css_sources(bundle: dict) -> tuple[list[str], list[str], list[str]]:
++    asset_root = Path(bundle.get("asset_root") or ".")
++    resources = bundle.get("resources", {})
++    css_links: list[str] = []
++    css_chunks: list[str] = []
++    script_links: list[str] = []
++
++    for resource in resources.values():
++        local_path = resource.get("local_path", "")
++        content_type = (resource.get("content_type") or "").lower()
++        disk_candidate = asset_root / Path(local_path).name
++        if local_path.endswith(".css") or "text/css" in content_type:
++            css_links.append(local_path)
++            try:
++                css_chunks.append(disk_candidate.read_text(encoding="utf-8", errors="ignore"))
++            except FileNotFoundError:
++                try:
++                    css_chunks.append((asset_root.parent / local_path).read_text(encoding="utf-8", errors="ignore"))
++                except FileNotFoundError:
++                    pass
++        if local_path.endswith(".js") or "javascript" in content_type:
++            script_links.append(local_path)
++
++    for page in bundle.get("pages", {}).values():
++        soup = BeautifulSoup(page.get("html", ""), "html.parser")
++        css_chunks.extend(tag.string or "" for tag in soup.find_all("style") if tag.string)
++        for script in soup.find_all("script"):
++            src = script.get("src")
++            if src and src not in script_links:
++                script_links.append(src)
++
++    return css_links, css_chunks, script_links
++
++
++def _collect_rule_maps(all_css: str) -> list[tuple[str, dict[str, str]]]:
++    rules: list[tuple[str, dict[str, str]]] = []
++    for selector_blob, body in CSS_RULE_PATTERN.findall(all_css):
++        selector = selector_blob.strip()
++        if not selector or selector.startswith("@"):
++            continue
++        decls = {name.strip().lower(): value.strip() for name, value in DECL_PATTERN.findall(body)}
++        if decls:
++            rules.append((selector, decls))
++    return rules
++
++
++def _selector_matches(selector: str, tag_name: str, classes: set[str]) -> bool:
++    for part in selector.split(","):
++        s = re.sub(r':[\w\-()]+', '', part).strip()
++        if not s:
++            continue
++        if any(tok in s for tok in ['[', '>', '+', '~']):
++            continue
++        tag_match = re.match(r'^([a-zA-Z][\w-]*)', s)
++        if tag_match and tag_match.group(1).lower() != tag_name.lower():
++            continue
++        needed_classes = {c for c in re.findall(r'\.([\w-]+)', s)}
++        if needed_classes and not needed_classes.issubset(classes):
++            continue
++        if tag_match or needed_classes:
++            return True
++    return False
++
++
++def _compute_metrics(el: Tag, rule_maps: list[tuple[str, dict[str, str]]]) -> dict[str, str]:
++    classes = set(el.get('class', []))
++    tag_name = el.name.lower()
++    style_values = _parse_inline_style(el.get('style', ''))
++    resolved: dict[str, str] = {}
++    for selector, decls in rule_maps:
++        if _selector_matches(selector, tag_name, classes):
++            for key in ('font-size', 'line-height', 'font-weight', 'letter-spacing'):
++                if key in decls:
++                    resolved[key] = decls[key]
++    resolved.update({k: v for k, v in style_values.items() if k in {'font-size', 'line-height', 'font-weight', 'letter-spacing'}})
++    return resolved
++
++
++def _metric_label(metrics: dict[str, str]) -> str:
++    return f"{metrics.get('font-size', '—')} / {metrics.get('line-height', '—')}"
++
++
++def _clone_and_replace_text(node: Tag, replacements: list[str]) -> str:
++    clone = BeautifulSoup(str(node), 'html.parser')
++    strings = [s for s in clone.find_all(string=True) if isinstance(s, NavigableString) and s.strip()]
++    rep_iter = iter(replacements)
++    for s in strings:
++        if s.parent and s.parent.name in {'script', 'style'}:
++            continue
++        try:
++            s.replace_with(next(rep_iter))
++        except StopIteration:
++            break
++    return str(clone)
++
++
++def _extract_hero_markup(root_soup: BeautifulSoup) -> str:
++    for tag in root_soup.find_all(['section', 'header', 'main', 'div']):
++        if tag.find('h1') and len(str(tag)) < 70000:
++            return _clone_and_replace_text(
++                tag,
++                [
++                    'Design system, motion & asset fidelity for the exact captured site.',
++                    'A living evidence file that reuses the original classes, assets, transitions and patterns from the exported bundle.',
++                    'See sections',
++                    'Open manifest',
++                ],
++            )
++    return ''
++
++
++def _style_bucket(metrics: dict[str, str], tag_name: str) -> tuple[str, float]:
++    size_match = re.search(r'([\d.]+)', metrics.get('font-size', '0'))
++    weight_match = re.search(r'([\d.]+)', metrics.get('font-weight', '400'))
++    size = float(size_match.group(1)) if size_match else 0.0
++    weight = float(weight_match.group(1)) if weight_match else 400.0
++
++    if tag_name == 'h1':
++        return 'Heading 1', size
++    if tag_name == 'h2':
++        return 'Heading 2', size
++    if tag_name == 'h3':
++        return 'Heading 3', size
++    if tag_name == 'h4':
++        return 'Heading 4', size
++    if tag_name == 'p' and size >= 18:
++        return 'Paragraph', size
++    if weight >= 600:
++        if size >= 20:
++            return 'Bold L', size
++        if size >= 16:
++            return 'Bold M', size
++        return 'Bold S', size
++    if size >= 20:
++        return 'Regular L', size
++    if size >= 16:
++        return 'Regular M', size
++    return 'Regular S', size
++
++
++def _extract_typography(root_soup: BeautifulSoup, rule_maps: list[tuple[str, dict[str, str]]]) -> list[dict]:
++    candidates: list[dict] = []
++    for el in root_soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'span', 'a', 'strong', 'button', 'label', 'div']):
++        text = el.get_text(' ', strip=True)
++        if not text or len(text) > 120 or el.find(['img', 'svg', 'video']):
++            continue
++        metrics = _compute_metrics(el, rule_maps)
++        label, size = _style_bucket(metrics, el.name.lower())
++        candidates.append(
++            {
++                'label': label,
++                'size': size,
++                'metric_label': _metric_label(metrics),
++                'markup': str(el),
++                'classes': ' '.join(el.get('class', [])),
++            }
++        )
++
++    chosen: dict[str, dict] = {}
++    for wanted in STYLE_ORDER:
++        matches = [c for c in candidates if c['label'] == wanted]
++        if not matches:
++            continue
++        matches.sort(key=lambda c: (c['size'], len(c['classes'])), reverse=True)
++        chosen[wanted] = matches[0]
++    return [chosen[name] for name in STYLE_ORDER if name in chosen]
++
++
++def _find_components(root_soup: BeautifulSoup) -> dict[str, list[str]]:
++    out = {'buttons': [], 'cards': [], 'inputs': [], 'icons': [], 'layouts': []}
++
++    for node in root_soup.find_all(['a', 'button']):
++        text = node.get_text(' ', strip=True)
++        if text and len(text) <= 50 and len(str(node)) < 2500 and str(node) not in out['buttons']:
++            out['buttons'].append(str(node))
++        if len(out['buttons']) >= 4:
++            break
++
++    for node in root_soup.find_all(['input', 'textarea', 'select']):
++        if len(str(node)) < 2500 and str(node) not in out['inputs']:
++            out['inputs'].append(str(node))
++        if len(out['inputs']) >= 3:
++            break
++
++    for node in root_soup.find_all(['article', 'a', 'div', 'section']):
++        classes = ' '.join(node.get('class', [])).lower()
++        if any(k in classes for k in ['card', 'tile', 'project', 'case', 'feature']) and len(str(node)) < 14000:
++            if str(node) not in out['cards']:
++                out['cards'].append(str(node))
++        if len(out['cards']) >= 4:
++            break
++
++    for node in root_soup.find_all(['section', 'div']):
++        if node.find(['h1', 'h2', 'h3']) and len(str(node)) < 28000:
++            markup = str(node)
++            if markup not in out['layouts']:
++                out['layouts'].append(markup)
++        if len(out['layouts']) >= 3:
++            break
++
++    for node in root_soup.find_all(['svg', 'img']):
++        if node.name == 'svg' and len(str(node)) < 5000:
++            out['icons'].append(str(node))
++        if len(out['icons']) >= 12:
++            break
++
++    return out
++
++
++def _build_state_mirror_css(all_css: str) -> str:
++    mirrored: list[str] = []
++    for selector_blob, body in CSS_RULE_PATTERN.findall(all_css):
++        selector = selector_blob.strip()
++        if ':hover' in selector:
++            mirrored.append(selector.replace(':hover', '.ds-force-hover') + '{' + body + '}')
++        if ':focus-visible' in selector:
++            mirrored.append(selector.replace(':focus-visible', '.ds-force-focus-visible') + '{' + body + '}')
++        if ':focus' in selector and ':focus-visible' not in selector:
++            mirrored.append(selector.replace(':focus', '.ds-force-focus') + '{' + body + '}')
++        if ':active' in selector:
++            mirrored.append(selector.replace(':active', '.ds-force-active') + '{' + body + '}')
++    return '\n'.join(mirrored)
++
++
++def _extract_context(bundle: dict) -> dict:
++    pages = bundle.get('pages', {})
++    css_links, css_chunks, script_links = _collect_css_sources(bundle)
++    all_css = '\n\n'.join(css_chunks)
++    rule_maps = _collect_rule_maps(all_css)
++
++    title = 'Site'
++    root_page = pages.get(bundle.get('root_url', ''))
++    if root_page and root_page.get('title'):
++        title = root_page['title']
++    elif pages:
++        title = next(iter(pages.values())).get('title') or title
++
++    soup_all = BeautifulSoup('\n'.join(page.get('html', '') for page in pages.values()), 'html.parser')
++    root_soup = BeautifulSoup(root_page.get('html', '') if root_page else '', 'html.parser')
++
++    tokens: dict[str, dict] = {}
++    for name, value in TOKEN_PATTERN.findall(all_css):
++        if name not in tokens:
++            clean_value = value.strip()
++            tokens[name] = {
++                'value': clean_value,
++                'label': _infer_label(name),
++                'is_color': bool(COLOR_PATTERN.search(clean_value)),
++            }
++
++    colors: list[str] = []
++    seen_colors: set[str] = set()
++    for value in [meta['value'] for meta in tokens.values()] + [m.group(0) for m in COLOR_PATTERN.finditer(all_css)]:
++        if not COLOR_PATTERN.search(value):
++            continue
++        key = value.lower()
++        if key not in seen_colors:
++            seen_colors.add(key)
++            colors.append(value)
++        if len(colors) >= 48:
++            break
++
++    gradients: list[str] = []
++    seen_gradients: set[str] = set()
++    for match in GRADIENT_PATTERN.finditer(all_css):
++        value = match.group(0).strip()
++        if value not in seen_gradients:
++            seen_gradients.add(value)
++            gradients.append(value)
++        if len(gradients) >= 16:
++            break
++
++    keyframes: list[str] = []
++    for block in KEYFRAME_BLOCK_PATTERN.findall(all_css):
++        if block not in keyframes:
++            keyframes.append(block)
++        if len(keyframes) >= 20:
++            break
++
++    transitions: list[str] = []
++    seen_transitions: set[str] = set()
++    for match in TRANSITION_PATTERN.finditer(all_css):
++        value = match.group(0).strip()
++        key = value[:220]
++        if key not in seen_transitions:
++            seen_transitions.add(key)
++            transitions.append(value)
++        if len(transitions) >= 20:
++            break
++
++    components = _find_components(root_soup)
++    typography = _extract_typography(root_soup, rule_maps)
++    class_counter = Counter()
++    for el in soup_all.find_all(class_=True):
++        for cls in el.get('class', []):
++            class_counter[cls] += 1
++
++    manifest = bundle.get('manifest', {})
++    return {
++        'title': title,
++        'prompt_text': PROMPT_TEXT,
++        'css_links': css_links,
++        'script_links': script_links,
++        'all_css': all_css,
++        'state_mirror_css': _build_state_mirror_css(all_css),
++        'tokens': tokens,
++        'colors': colors,
++        'gradients': gradients,
++        'keyframes': keyframes,
++        'transitions': transitions,
++        'typography': typography,
++        'components': components,
++        'pages': manifest.get('pages', []),
++        'top_classes': class_counter.most_common(24),
++        'hero_markup': _extract_hero_markup(root_soup),
++        'page_count': manifest.get('page_count', len(pages)),
++        'asset_count': manifest.get('asset_count', len(bundle.get('resources', {}))),
++        'unresolved': manifest.get('unresolved_urls', []),
++    }
++
++
++def _render_states(markup: str, include_disabled: bool = True) -> str:
++    variants = []
++    states = [('Default', None), ('Hover', 'ds-force-hover'), ('Active', 'ds-force-active'), ('Focus', 'ds-force-focus')]
++    for label, state in states:
++        clone = BeautifulSoup(markup, 'html.parser')
++        target = clone.find(True)
++        if not target:
++            continue
++        if state:
++            target['class'] = list(target.get('class', [])) + [state]
++        variants.append(f"<article class='ds-state-card'><div class='ds-state-label'>{html.escape(label)}</div><div class='ds-state-preview'>{str(target)}</div></article>")
++    if include_disabled:
++        clone = BeautifulSoup(markup, 'html.parser')
++        target = clone.find(True)
++        if target and target.name in {'button', 'input', 'select', 'textarea'}:
++            target['disabled'] = 'disabled'
++            variants.append(f"<article class='ds-state-card'><div class='ds-state-label'>Disabled</div><div class='ds-state-preview'>{str(target)}</div></article>")
++    return ''.join(variants)
++
++
++def _render_local_design_system(ctx: dict) -> str:
++    css_tags = '\n'.join(f'<link rel="stylesheet" href="{html.escape(h)}">' for h in ctx['css_links'])
++    script_tags = '\n'.join(f'<script src="{html.escape(h)}"></script>' for h in ctx['script_links'])
++
++    typography_rows = ''.join(
++        f"<article class='ds-type-row'><div class='ds-type-name'>{html.escape(item['label'])}</div><div class='ds-type-preview'>{item['markup']}</div><div class='ds-type-metric'>{html.escape(item['metric_label'])}</div></article>"
++        for item in ctx['typography']
++    ) or "<div class='ds-empty'>No typography evidence extracted.</div>"
++
++    token_rows = ''.join(
++        "<article class='ds-token'>"
++        + (f"<span class='ds-token-swatch' style='background:{html.escape(meta['value'])}'></span>" if meta['is_color'] else "<span class='ds-token-swatch ds-token-empty'></span>")
++        + f"<div class='ds-token-meta'><strong>{html.escape(meta['label'])}</strong><code>{html.escape(name)}</code><span>{html.escape(meta['value'])}</span></div></article>"
++        for name, meta in list(ctx['tokens'].items())[:80]
++    ) or "<div class='ds-empty'>No tokens found.</div>"
++
++    gradient_rows = ''.join(
++        f"<article class='ds-token'><span class='ds-token-swatch' style='background:{html.escape(value)}'></span><div class='ds-token-meta'><strong>Gradient</strong><span>{html.escape(value)}</span></div></article>"
++        for value in ctx['gradients'][:12]
++    )
++
++    button_states = ''.join(_render_states(markup, include_disabled=True) for markup in ctx['components']['buttons'][:3])
++    input_states = ''.join(_render_states(markup, include_disabled=True) for markup in ctx['components']['inputs'][:2])
++    card_states = ''.join(_render_states(markup, include_disabled=False) for markup in ctx['components']['cards'][:2])
++    layouts_markup = ''.join(f"<article class='ds-layout-pattern'>{markup}</article>" for markup in ctx['components']['layouts'][:3]) or "<div class='ds-empty'>No layout patterns recovered.</div>"
++    motion_markup = ''.join(f"<article class='ds-motion-card'><div class='ds-motion-preview'>{markup}</div></article>" for markup in (ctx['components']['buttons'][:2] + ctx['components']['cards'][:2])) or "<div class='ds-empty'>No motion gallery components isolated.</div>"
++    motion_specs = ''.join(f'<pre>{html.escape(block)}</pre>' for block in (ctx['keyframes'][:8] + ctx['transitions'][:8])) or "<div class='ds-empty'>No motion evidence found.</div>"
++    icons_markup = ''.join(f"<article class='ds-icon-card'>{markup}</article>" for markup in ctx['components']['icons'][:12])
++
++    nav_items = [('hero', 'Hero'), ('typography', 'Typography'), ('colors', 'Colors & Surfaces'), ('components', 'UI Components'), ('layout', 'Layout & Spacing'), ('motion', 'Motion & Interaction')]
++    if icons_markup:
++        nav_items.append(('icons', 'Icons'))
++    nav_html = ''.join(f'<a href="#{anchor}">{label}</a>' for anchor, label in nav_items)
++
++    page_rows = ''.join(
++        f"<tr><td><code>{html.escape(page.get('local_path',''))}</code></td><td>{html.escape(page.get('title',''))}</td><td><code>{html.escape(page.get('url',''))}</code></td></tr>"
++        for page in ctx['pages']
++    ) or '<tr><td colspan="3">No pages in manifest.</td></tr>'
++    unresolved_list = ''.join(f'<li><code>{html.escape(url)}</code></li>' for url in ctx['unresolved'][:40]) or '<li>None</li>'
++    hero_markup = ctx['hero_markup'] or '<section><h1>Design System</h1><p>Hero evidence unavailable.</p></section>'
++
++    return f'''<!DOCTYPE html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>Design System — {html.escape(ctx['title'])}</title>
++{css_tags}
++{script_tags}
++<style>
++{ctx['all_css']}
++{ctx['state_mirror_css']}
++html {{ scroll-behavior: smooth; }}
++body {{ margin:0; }}
++.ds-topnav {{ position:sticky; top:0; z-index:999; display:flex; gap:12px; flex-wrap:wrap; padding:14px 20px; backdrop-filter:blur(20px); background:rgba(255,255,255,.72); border-bottom:1px solid rgba(0,0,0,.08); }}
++.ds-topnav a {{ text-decoration:none; }}
++.ds-doc-frame {{ width:min(100% - 48px, 1440px); margin:0 auto; padding:56px 0; }}
++.ds-doc-header {{ display:grid; gap:16px; margin-bottom:28px; }}
++.ds-doc-header h2, .ds-doc-header p {{ margin:0; }}
++.ds-spec-list {{ display:grid; gap:12px; }}
++.ds-type-row {{ display:grid; grid-template-columns:minmax(120px, 220px) minmax(0,1fr) 140px; gap:20px; align-items:center; padding:16px 0; border-top:1px solid rgba(0,0,0,.08); }}
++.ds-type-row:last-child {{ border-bottom:1px solid rgba(0,0,0,.08); }}
++.ds-type-name, .ds-type-metric {{ font-size:12px; letter-spacing:.06em; text-transform:uppercase; opacity:.72; }}
++.ds-type-metric {{ text-align:right; }}
++.ds-token-grid, .ds-state-grid, .ds-layout-grid, .ds-icon-grid {{ display:grid; gap:16px; grid-template-columns:repeat(12,minmax(0,1fr)); }}
++.ds-token, .ds-state-card, .ds-layout-pattern, .ds-icon-card, .ds-motion-card {{ border:1px solid rgba(0,0,0,.08); border-radius:16px; overflow:hidden; padding:16px; }}
++.ds-token {{ grid-column:span 3; display:flex; gap:12px; align-items:center; min-height:88px; }}
++.ds-token-swatch {{ width:56px; height:56px; border-radius:14px; display:block; border:1px solid rgba(0,0,0,.08); flex:none; }}
++.ds-token-empty {{ background:repeating-linear-gradient(45deg, rgba(0,0,0,.04), rgba(0,0,0,.04) 6px, rgba(0,0,0,.08) 6px, rgba(0,0,0,.08) 12px); }}
++.ds-token-meta {{ display:flex; flex-direction:column; gap:4px; min-width:0; }}
++.ds-token-meta code, .ds-token-meta span {{ overflow-wrap:anywhere; }}
++.ds-state-card, .ds-motion-card {{ grid-column:span 3; }}
++.ds-layout-pattern {{ grid-column:span 4; }}
++.ds-icon-card {{ grid-column:span 2; display:flex; align-items:center; justify-content:center; min-height:120px; }}
++.ds-state-label {{ margin-bottom:12px; font-size:12px; letter-spacing:.06em; text-transform:uppercase; opacity:.72; }}
++.ds-state-preview, .ds-motion-preview {{ min-height:64px; display:flex; align-items:center; }}
++.ds-motion-specs {{ display:grid; gap:12px; margin-top:20px; }}
++.ds-motion-specs pre {{ margin:0; padding:14px; border:1px solid rgba(0,0,0,.08); border-radius:14px; overflow:auto; }}
++.ds-empty {{ padding:16px; border:1px dashed rgba(0,0,0,.18); border-radius:16px; opacity:.72; }}
++.ds-integrity table {{ width:100%; border-collapse:collapse; }}
++.ds-integrity td, .ds-integrity th {{ padding:12px 10px; border-top:1px solid rgba(0,0,0,.08); text-align:left; vertical-align:top; }}
++@media (max-width: 1100px) {{
++  .ds-token, .ds-state-card, .ds-motion-card {{ grid-column:span 6; }}
++  .ds-layout-pattern {{ grid-column:span 12; }}
++  .ds-icon-card {{ grid-column:span 3; }}
++}}
++@media (max-width: 760px) {{
++  .ds-doc-frame {{ width:min(100% - 24px, 1440px); padding:40px 0; }}
++  .ds-type-row {{ grid-template-columns:1fr; gap:10px; }}
++  .ds-type-metric {{ text-align:left; }}
++  .ds-token, .ds-state-card, .ds-layout-pattern, .ds-icon-card, .ds-motion-card {{ grid-column:span 12; }}
++}}
++</style>
++</head>
++<body>
++<nav class="ds-topnav">{nav_html}</nav>
++<section id="hero">{hero_markup}</section>
++<section id="typography"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Typography</h2><p>Exact elements and classes found in the captured HTML, ordered as requested. Metrics are inferred from the captured CSS bundle.</p></header><div class="ds-spec-list">{typography_rows}</div></div></section>
++<section id="colors"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Colors &amp; Surfaces</h2><p>Backgrounds, borders, gradients and surfaces extracted from the actual bundle. No invented palette.</p></header><div class="ds-token-grid">{token_rows}</div><div class="ds-token-grid">{gradient_rows}</div></div></section>
++<section id="components"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>UI Components</h2><p>States are mirrored from the original pseudo-state selectors. The styling is reused from the captured CSS and classes.</p></header><div class="ds-state-grid">{button_states}{input_states}{card_states}</div></div></section>
++<section id="layout"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Layout &amp; Spacing</h2><p>Real layout patterns from the site. This section reuses actual wrappers instead of redrawing a fake grid.</p></header><div class="ds-layout-grid">{layouts_markup}</div></div></section>
++<section id="motion"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Motion &amp; Interaction</h2><p>Animation classes, transitions and interaction states from the original CSS. The gallery below reuses live markup.</p></header><div class="ds-state-grid">{motion_markup}</div><div class="ds-motion-specs">{motion_specs}</div></div></section>
++{f'<section id="icons"><div class="ds-doc-frame"><header class="ds-doc-header"><h2>Icons</h2><p>Exact icon style and markup recovered from the captured HTML.</p></header><div class="ds-icon-grid">{icons_markup}</div></div></section>' if icons_markup else ''}
++<section><div class="ds-doc-frame ds-integrity"><header class="ds-doc-header"><h2>Integrity</h2><p>Coverage evidence for the exported site package.</p></header><table><thead><tr><th>Local path</th><th>Title</th><th>Original URL</th></tr></thead><tbody>{page_rows}</tbody></table><div><h3>Pending remote references</h3><ul>{unresolved_list}</ul></div><details><summary>Prompt used to organize this design system</summary><pre>{html.escape(ctx['prompt_text'])}</pre></details></div></section>
++</body>
++</html>'''
++
++
++def generate_design_system(source) -> str:
++    if isinstance(source, str):
++        bundle = {
++            'root_url': 'https://captured.local',
++            'pages': {'https://captured.local': {'local_path': 'index.html', 'html': source, 'title': 'Captured page'}},
++            'resources': {},
++            'manifest': {'pages': [{'local_path': 'index.html', 'url': 'https://captured.local', 'title': 'Captured page'}]},
++        }
++    else:
++        bundle = source
++
++    ctx = _extract_context(bundle)
++
++    if DESIGN_SYSTEM_MODE in {'auto', 'llm'} and ANTHROPIC_API_KEY:
++        llm_html = _call_claude_api(
++            'Return a complete design-system.html document only. Preserve exact classes, assets and layout patterns from the provided site evidence. Never invent tokens or components.',
++            json.dumps(
++                {
++                    'prompt': ctx['prompt_text'],
++                    'title': ctx['title'],
++                    'page_count': ctx['page_count'],
++                    'asset_count': ctx['asset_count'],
++                    'tokens': ctx['tokens'],
++                    'colors': ctx['colors'],
++                    'gradients': ctx['gradients'],
++                    'keyframes': ctx['keyframes'],
++                    'transitions': ctx['transitions'],
++                    'typography': ctx['typography'],
++                    'components': ctx['components'],
++                    'pages': ctx['pages'],
++                    'unresolved': ctx['unresolved'],
++                    'hero_markup': ctx['hero_markup'],
++                    'css_links': ctx['css_links'],
++                    'script_links': ctx['script_links'],
++                },
++                ensure_ascii=False,
++            ),
++        )
++        if llm_html and llm_html.lstrip().startswith('<!DOCTYPE html>'):
++            return llm_html
++
++    return _render_local_design_system(ctx)
+diff -ruN /mnt/data/origv2/src/downloader.py /mnt/data/projectv2/src/downloader.py
+--- /mnt/data/origv2/src/downloader.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/downloader.py	2026-04-10 22:50:55.118787905 +0000
+@@ -0,0 +1,804 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import mimetypes
++import os
++import re
++import tempfile
++import time
++import urllib.error
++import urllib.request
++import zipfile
++from collections import deque
++from pathlib import Path
++from urllib.parse import urldefrag, urljoin, urlparse
++
++from bs4 import BeautifulSoup
++from playwright.sync_api import sync_playwright
++
++SCROLL_DELAY = 0.45
++SCROLL_STEPS = 10
++WAIT_AFTER_LOAD_MS = 2_500
++PAGE_TIMEOUT_MS = 55_000
++POST_SCROLL_WAIT_MS = 1_200
++REQUEST_TIMEOUT_SECONDS = 25
++
++MAX_ASSET_BYTES = max(256_000, int(os.getenv("MAX_ASSET_BYTES", str(25 * 1024 * 1024))))
++MAX_CAPTURED_RESOURCES = max(50, int(os.getenv("MAX_CAPTURED_RESOURCES", "900")))
++MAX_CRAWL_PAGES = max(1, int(os.getenv("MAX_CRAWL_PAGES", "14")))
++MAX_CRAWL_DEPTH = max(0, int(os.getenv("MAX_CRAWL_DEPTH", "2")))
++MAX_CSS_IMPORT_DEPTH = max(1, int(os.getenv("MAX_CSS_IMPORT_DEPTH", "4")))
++
++FRAMEWORK_PATTERNS = [
++    r"_next/static",
++    r"__nuxt",
++    r"gatsby",
++    r"__remix",
++    r"webpack",
++]
++
++SCROLL_LIB_PATTERNS = [
++    r"lenis",
++    r"locomotive",
++    r"smooth-scroll",
++    r"@studio-freight",
++]
++
++RESOURCE_EXTS = {
++    ".css",
++    ".js",
++    ".mjs",
++    ".png",
++    ".jpg",
++    ".jpeg",
++    ".gif",
++    ".webp",
++    ".svg",
++    ".woff",
++    ".woff2",
++    ".ttf",
++    ".otf",
++    ".eot",
++    ".ico",
++    ".mp4",
++    ".webm",
++    ".avif",
++    ".json",
++    ".txt",
++}
++
++CAPTURED_RESOURCE_TYPES = {
++    "stylesheet",
++    "script",
++    "image",
++    "font",
++    "media",
++    "fetch",
++    "xhr",
++    "other",
++}
++
++CSS_URL_PATTERN = re.compile(r"url\(([^)]+)\)")
++CSS_IMPORT_PATTERN = re.compile(r"@import\s+(?:url\()?['\"]?([^'\")\s;]+)['\"]?\)?[^;]*;", re.IGNORECASE)
++COLOR_PATTERN = re.compile(
++    r"#[0-9a-fA-F]{3,8}\b|rgba?\([^\)]+\)|hsla?\([^\)]+\)|oklch\([^\)]+\)|color\([^\)]+\)"
++)
++USER_AGENT = (
++    "Mozilla/5.0 (X11; Linux x86_64) "
++    "AppleWebKit/537.36 (KHTML, like Gecko) "
++    "Chrome/122.0.0.0 Safari/537.36"
++)
++
++ABSOLUTE_ASSET_PATTERN = re.compile(r"(?:https?:)?//[^\s'\")>]+\.(?:png|jpe?g|gif|webp|svg|avif|woff2?|ttf|otf|mp4|webm)(?:\?[^\s'\")>]+)?", re.IGNORECASE)
++RELATIVE_ASSET_PATTERN = re.compile(r"(?:src|href|poster)=[\"']([^\"']+\.(?:png|jpe?g|gif|webp|svg|avif|woff2?|ttf|otf|mp4|webm)(?:\?[^\"']+)?)", re.IGNORECASE)
++
++
++# ---------------------------------------------------------------------------
++# Primitive helpers
++# ---------------------------------------------------------------------------
++
++def _guess_ext(url: str, content_type: str = "") -> str:
++    mime, _ = mimetypes.guess_type(url)
++    mime = mime or content_type.split(";", 1)[0].strip().lower()
++    mapping = {
++        "text/css": ".css",
++        "application/javascript": ".js",
++        "text/javascript": ".js",
++        "application/json": ".json",
++        "text/plain": ".txt",
++        "image/png": ".png",
++        "image/jpeg": ".jpg",
++        "image/gif": ".gif",
++        "image/webp": ".webp",
++        "image/svg+xml": ".svg",
++        "image/avif": ".avif",
++        "font/woff": ".woff",
++        "font/woff2": ".woff2",
++        "font/ttf": ".ttf",
++        "font/otf": ".otf",
++        "video/mp4": ".mp4",
++        "video/webm": ".webm",
++    }
++    return mapping.get(mime, "")
++
++
++
++def _slug(url: str, content_type: str = "") -> str:
++    digest = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
++    path = urlparse(url).path
++    ext = Path(path).suffix.lower() or ""
++    if ext not in RESOURCE_EXTS:
++        ext = _guess_ext(url, content_type)
++    return f"{digest}{ext}"
++
++
++
++def _clean_url(url: str) -> str:
++    base, _ = urldefrag(url)
++    return base.strip()
++
++
++
++def _origin(url: str) -> tuple[str, str]:
++    parsed = urlparse(url)
++    return parsed.scheme.lower(), parsed.netloc.lower()
++
++
++
++def _same_origin(a: str, b: str) -> bool:
++    return _origin(a) == _origin(b)
++
++
++
++def _is_probable_page(url: str) -> bool:
++    path = urlparse(url).path or "/"
++    suffix = Path(path).suffix.lower()
++    return suffix in {"", ".html", ".htm"}
++
++
++
++def _normalize_page_url(url: str) -> str:
++    parsed = urlparse(_clean_url(url))
++    path = parsed.path or "/"
++    if path != "/" and path.endswith("/"):
++        path = path.rstrip("/")
++    query = f"?{parsed.query}" if parsed.query else ""
++    return f"{parsed.scheme}://{parsed.netloc}{path}{query}"
++
++
++
++def _page_local_path(page_url: str, root_url: str) -> str:
++    parsed = urlparse(page_url)
++    path = parsed.path or "/"
++    if page_url == _normalize_page_url(root_url) or path == "/":
++        return "index.html"
++
++    clean = path.lstrip("/")
++    if not clean:
++        return "index.html"
++
++    if clean.endswith("/"):
++        clean = clean.rstrip("/")
++
++    suffix = Path(clean).suffix.lower()
++    if suffix in {".html", ".htm"}:
++        return clean
++    return f"{clean}/index.html"
++
++
++
++def _relative_to(from_file: str, target: str) -> str:
++    return os.path.relpath(target, start=str(Path(from_file).parent)).replace("\\", "/")
++
++
++
++def _matches(text: str, patterns: list[str]) -> bool:
++    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
++
++
++
++def _should_capture(response) -> bool:
++    request_type = response.request.resource_type or ""
++    if request_type not in CAPTURED_RESOURCE_TYPES:
++        return False
++
++    content_type = response.headers.get("content-type", "").lower()
++    if any(
++        token in content_type
++        for token in (
++            "text/css",
++            "javascript",
++            "image/",
++            "font/",
++            "video/",
++            "audio/",
++            "svg+xml",
++            "application/json",
++        )
++    ):
++        return True
++
++    ext = Path(urlparse(response.url).path).suffix.lower()
++    return ext in RESOURCE_EXTS
++
++
++
++def _discover_links(page_url: str, html: str, root_url: str) -> list[str]:
++    root_scheme, root_netloc = _origin(root_url)
++    soup = BeautifulSoup(html, "html.parser")
++    found: list[str] = []
++    seen: set[str] = set()
++
++    for tag in soup.find_all("a", href=True):
++        raw = (tag.get("href") or "").strip()
++        if not raw or raw.startswith(("#", "mailto:", "tel:", "javascript:", "data:")):
++            continue
++        absolute = _normalize_page_url(urljoin(page_url, raw))
++        parsed = urlparse(absolute)
++        if (parsed.scheme.lower(), parsed.netloc.lower()) != (root_scheme, root_netloc):
++            continue
++        if not _is_probable_page(absolute):
++            continue
++        if absolute not in seen:
++            seen.add(absolute)
++            found.append(absolute)
++    return found
++
++
++
++def _fetch_url_bytes(abs_url: str) -> tuple[bytes | None, str]:
++    req = urllib.request.Request(
++        abs_url,
++        headers={
++            "User-Agent": USER_AGENT,
++            "Accept": "*/*",
++        },
++    )
++    try:
++        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
++            content_type = resp.headers.get("Content-Type", "")
++            body = resp.read(MAX_ASSET_BYTES + 1)
++            if len(body) > MAX_ASSET_BYTES:
++                return None, content_type
++            return body, content_type
++    except (urllib.error.URLError, TimeoutError, ValueError):
++        return None, ""
++
++
++
++
++def _discover_asset_urls_from_text(text: str, base_url: str) -> list[str]:
++    found: list[str] = []
++    seen: set[str] = set()
++    for match in ABSOLUTE_ASSET_PATTERN.finditer(text or ""):
++        raw = match.group(0)
++        if raw.startswith("//"):
++            raw = "https:" + raw
++        absolute = _clean_url(raw)
++        if absolute and absolute not in seen:
++            seen.add(absolute)
++            found.append(absolute)
++    for match in RELATIVE_ASSET_PATTERN.finditer(text or ""):
++        absolute = _clean_url(urljoin(base_url, match.group(1)))
++        if absolute and absolute not in seen:
++            seen.add(absolute)
++            found.append(absolute)
++    return found
++
++
++def _extract_runtime_asset_urls(page) -> list[str]:
++    try:
++        values = page.evaluate(
++            """
++            () => {
++              const found = new Set();
++              const push = (value) => {
++                if (!value || typeof value !== 'string') return;
++                const v = value.trim();
++                if (!v || v.startsWith('data:') || v.startsWith('blob:') || v.startsWith('javascript:')) return;
++                found.add(v);
++              };
++              document.querySelectorAll('*').forEach((el) => {
++                if (el.currentSrc) push(el.currentSrc);
++                ['src','href','poster','data-src','data-bg','data-background-image'].forEach((attr) => push(el.getAttribute(attr)));
++                const srcset = el.getAttribute('srcset');
++                if (srcset) {
++                  srcset.split(',').forEach((part) => {
++                    const src = part.trim().split(/\s+/)[0];
++                    push(src);
++                  });
++                }
++                const style = window.getComputedStyle(el);
++                const bg = style && style.backgroundImage;
++                if (bg && bg !== 'none') {
++                  bg.split(',').forEach((entry) => {
++                    const m = entry.match(/url\(["']?(.+?)["']?\)/);
++                    if (m && m[1]) push(m[1]);
++                  });
++                }
++              });
++              performance.getEntriesByType('resource').forEach((entry) => push(entry.name));
++              return Array.from(found);
++            }
++            """
++        ) or []
++        return [u for u in values if isinstance(u, str)]
++    except Exception:
++        return []
++
++# ---------------------------------------------------------------------------
++# Rewriting helpers
++# ---------------------------------------------------------------------------
++
++def _rewrite_css_blob(
++    css_text: str,
++    base_url: str,
++    from_local_path: str,
++    ensure_resource,
++    unresolved_urls: set[str],
++) -> str:
++    def replace_import(match: re.Match[str]) -> str:
++        raw = match.group(1).strip().strip("'\"")
++        if not raw or raw.startswith(("data:", "blob:", "javascript:")):
++            return match.group(0)
++        absolute = _clean_url(urljoin(base_url, raw))
++        local = ensure_resource(absolute)
++        if not local:
++            unresolved_urls.add(absolute)
++            return match.group(0)
++        rel = _relative_to(from_local_path, local)
++        return match.group(0).replace(raw, rel)
++
++    def replace_css_url(match: re.Match[str]) -> str:
++        raw = match.group(1).strip().strip("'\"")
++        if not raw or raw.startswith(("data:", "#", "blob:", "javascript:")):
++            return match.group(0)
++        absolute = _clean_url(urljoin(base_url, raw))
++        local = ensure_resource(absolute)
++        if not local:
++            unresolved_urls.add(absolute)
++            return match.group(0)
++        rel = _relative_to(from_local_path, local)
++        return f"url('{rel}')"
++
++    css_text = CSS_IMPORT_PATTERN.sub(replace_import, css_text)
++    css_text = CSS_URL_PATTERN.sub(replace_css_url, css_text)
++    return css_text
++
++
++
++def _rewrite_document(
++    page_url: str,
++    html: str,
++    current_local_path: str,
++    root_url: str,
++    page_local_map: dict[str, str],
++    resources: dict[str, dict],
++    ensure_resource,
++    unresolved_urls: set[str],
++    clean_scripts: bool,
++) -> str:
++    soup = BeautifulSoup(html, "html.parser")
++
++    def local_for_resource(raw_url: str) -> str | None:
++        absolute = _clean_url(urljoin(page_url, raw_url))
++        if absolute in page_local_map:
++            return _relative_to(current_local_path, page_local_map[absolute])
++        entry = resources.get(absolute)
++        if entry:
++            return _relative_to(current_local_path, entry["local_path"])
++        ensured = ensure_resource(absolute)
++        if ensured:
++            return _relative_to(current_local_path, ensured)
++        unresolved_urls.add(absolute)
++        return None
++
++    for tag in soup.find_all(["a", "link", "script", "img", "source", "video", "audio", "track"]):
++        for attr in ("href", "src", "data-src", "poster"):
++            value = tag.get(attr)
++            if not value or str(value).startswith(("data:", "#", "blob:", "javascript:", "mailto:", "tel:")):
++                continue
++            rewritten = local_for_resource(value)
++            if rewritten:
++                tag[attr] = rewritten
++
++        srcset = tag.get("srcset")
++        if srcset:
++            new_parts = []
++            for part in srcset.split(","):
++                part = part.strip()
++                if not part:
++                    continue
++                pieces = part.split()
++                src = pieces[0]
++                descriptor = " ".join(pieces[1:])
++                rewritten = local_for_resource(src)
++                if rewritten:
++                    new_parts.append(f"{rewritten} {descriptor}".strip())
++                else:
++                    new_parts.append(part)
++            tag["srcset"] = ", ".join(new_parts)
++
++    for tag in soup.find_all(True):
++        for attr, raw_value in list(tag.attrs.items()):
++            if attr in {'class', 'style', 'srcset'}:
++                continue
++            if isinstance(raw_value, list) or not isinstance(raw_value, str):
++                continue
++            value = raw_value.strip()
++            if not value or value.startswith(('data:', '#', 'blob:', 'javascript:', 'mailto:', 'tel:')):
++                continue
++            if '://' not in value and not value.startswith(('/', './', '../')):
++                continue
++            rewritten = local_for_resource(value)
++            if rewritten:
++                tag[attr] = rewritten
++
++    for node in soup.find_all(style=True):
++        node["style"] = _rewrite_css_blob(
++            str(node["style"]),
++            page_url,
++            current_local_path,
++            ensure_resource,
++            unresolved_urls,
++        )
++
++    for style_tag in soup.find_all("style"):
++        if style_tag.string:
++            style_tag.string = _rewrite_css_blob(
++                style_tag.string,
++                page_url,
++                current_local_path,
++                ensure_resource,
++                unresolved_urls,
++            )
++
++    if clean_scripts:
++        removed = 0
++        for tag in soup.find_all("script"):
++            src = tag.get("src", "")
++            content = tag.string or ""
++            if _matches(src, FRAMEWORK_PATTERNS + SCROLL_LIB_PATTERNS):
++                tag.decompose()
++                removed += 1
++            elif _matches(content, SCROLL_LIB_PATTERNS):
++                tag.decompose()
++                removed += 1
++        if removed and soup.body:
++            marker = soup.new_tag("meta")
++            marker.attrs["name"] = "capturar-removed-scripts"
++            marker.attrs["content"] = str(removed)
++            soup.body.insert(0, marker)
++
++    fix_css = soup.new_tag("style")
++    fix_css.string = (
++        "html, body { overflow-x: hidden !important; }"
++        "* { scroll-behavior: auto !important; }"
++    )
++    if soup.head:
++        soup.head.append(fix_css)
++    elif soup.html:
++        head = soup.new_tag("head")
++        head.append(fix_css)
++        soup.html.insert(0, head)
++
++    return str(soup)
++
++
++# ---------------------------------------------------------------------------
++# Main pipeline
++# ---------------------------------------------------------------------------
++
++def download_site(
++    url: str,
++    zip_path: Path,
++    options: dict,
++    design_system_output_path: Path | None = None,
++):
++    started_at = time.monotonic()
++    root_url = _normalize_page_url(url)
++
++    def ev(msg: str, level: str = "", progress: int | None = None) -> dict:
++        data = {"type": "log", "msg": msg, "level": level}
++        if progress is not None:
++            data["progress"] = progress
++        return data
++
++    zip_path.parent.mkdir(parents=True, exist_ok=True)
++    if design_system_output_path:
++        design_system_output_path.parent.mkdir(parents=True, exist_ok=True)
++        design_system_output_path.unlink(missing_ok=True)
++
++    with tempfile.TemporaryDirectory(prefix=f"{zip_path.stem}-", dir=zip_path.parent) as temp_dir_name:
++        temp_dir = Path(temp_dir_name)
++        resources: dict[str, dict] = {}
++        unresolved_urls: set[str] = set()
++        skipped_large = 0
++        fetched_out_of_band = 0
++
++        def save_bytes(abs_url: str, body: bytes, content_type: str) -> str | None:
++            if not body or len(body) > MAX_ASSET_BYTES:
++                return None
++            abs_url = _clean_url(abs_url)
++            if abs_url in resources:
++                return resources[abs_url]["local_path"]
++            if len(resources) >= MAX_CAPTURED_RESOURCES:
++                return None
++            filename = _slug(abs_url, content_type)
++            local_path = f"assets/{filename}"
++            disk_path = temp_dir / local_path
++            disk_path.parent.mkdir(parents=True, exist_ok=True)
++            disk_path.write_bytes(body)
++            resources[abs_url] = {
++                "local_path": local_path,
++                "disk_path": disk_path,
++                "content_type": content_type,
++                "size": len(body),
++                "source": "network",
++            }
++            return local_path
++
++        def ensure_resource(abs_url: str, import_depth: int = 0) -> str | None:
++            nonlocal fetched_out_of_band
++            abs_url = _clean_url(abs_url)
++            if not abs_url:
++                return None
++            entry = resources.get(abs_url)
++            if entry:
++                return entry["local_path"]
++            if len(resources) >= MAX_CAPTURED_RESOURCES:
++                return None
++            body, content_type = _fetch_url_bytes(abs_url)
++            if not body:
++                return None
++            local_path = save_bytes(abs_url, body, content_type)
++            if not local_path:
++                return None
++            fetched_out_of_band += 1
++            if local_path.endswith(".css") and import_depth < MAX_CSS_IMPORT_DEPTH:
++                try:
++                    css_text = (temp_dir / local_path).read_text(encoding="utf-8", errors="ignore")
++                    rewritten = _rewrite_css_blob(
++                        css_text,
++                        abs_url,
++                        local_path,
++                        lambda u: ensure_resource(u, import_depth + 1),
++                        unresolved_urls,
++                    )
++                    (temp_dir / local_path).write_text(rewritten, encoding="utf-8")
++                except Exception:
++                    pass
++            return local_path
++
++        yield ev(
++            f"Iniciando captura same-origin: até {MAX_CRAWL_PAGES} páginas, profundidade {MAX_CRAWL_DEPTH} e fechamento máximo de assets.",
++            progress=6,
++        )
++
++        pages_raw: dict[str, str] = {}
++        crawl_order: list[str] = []
++        seen_pages: set[str] = {root_url}
++        queue: deque[tuple[str, int]] = deque([(root_url, 0)])
++
++        with sync_playwright() as pw:
++            browser = pw.chromium.launch(
++                headless=True,
++                args=["--no-sandbox", "--disable-setuid-sandbox"],
++            )
++            context = browser.new_context(
++                viewport={"width": 1440, "height": 900},
++                user_agent=USER_AGENT,
++            )
++            page = context.new_page()
++
++            def handle_response(response):
++                nonlocal skipped_large
++                try:
++                    if len(resources) >= MAX_CAPTURED_RESOURCES:
++                        return
++                    if response.status not in (200, 206):
++                        return
++                    if not _should_capture(response):
++                        return
++                    content_length = response.headers.get("content-length")
++                    if content_length and content_length.isdigit() and int(content_length) > MAX_ASSET_BYTES:
++                        skipped_large += 1
++                        return
++                    body = response.body()
++                    if not body:
++                        return
++                    if len(body) > MAX_ASSET_BYTES:
++                        skipped_large += 1
++                        return
++                    content_type = response.headers.get("content-type", "")
++                    save_bytes(response.url, body, content_type)
++                except Exception:
++                    return
++
++            page.on("response", handle_response)
++
++            while queue and len(crawl_order) < MAX_CRAWL_PAGES:
++                current_url, depth = queue.popleft()
++                yield ev(
++                    f"Capturando página {len(crawl_order) + 1}/{MAX_CRAWL_PAGES}: {urlparse(current_url).path or '/'}",
++                    progress=min(12 + len(crawl_order) * 6, 58),
++                )
++                try:
++                    page.goto(current_url, wait_until="networkidle", timeout=PAGE_TIMEOUT_MS)
++                    if options.get("js", True):
++                        page.wait_for_timeout(WAIT_AFTER_LOAD_MS)
++                    if options.get("lazy", True):
++                        height = page.evaluate("document.body.scrollHeight") or 0
++                        for step in range(SCROLL_STEPS):
++                            page.evaluate(
++                                f"window.scrollTo(0, {int(height * (step + 1) / max(1, SCROLL_STEPS))})"
++                            )
++                            time.sleep(SCROLL_DELAY)
++                        page.evaluate("window.scrollTo(0, 0)")
++                        page.wait_for_timeout(POST_SCROLL_WAIT_MS)
++                    runtime_asset_urls = _extract_runtime_asset_urls(page)
++                    html_content = page.content()
++                    for asset_url in runtime_asset_urls:
++                        ensure_resource(_clean_url(urljoin(current_url, asset_url)))
++                except Exception as exc:
++                    yield ev(f"Aviso: falha ao capturar {current_url} ({exc})", level="error")
++                    continue
++
++                pages_raw[current_url] = html_content
++                crawl_order.append(current_url)
++
++                if depth < MAX_CRAWL_DEPTH and len(seen_pages) < MAX_CRAWL_PAGES:
++                    for discovered in _discover_links(current_url, html_content, root_url):
++                        if discovered not in seen_pages and len(seen_pages) < MAX_CRAWL_PAGES:
++                            seen_pages.add(discovered)
++                            queue.append((discovered, depth + 1))
++
++            context.close()
++            browser.close()
++
++        yield ev("Varredura adicional de assets referenciados em HTML, CSS e JS...", progress=62)
++        for page_url, html_blob in pages_raw.items():
++            for asset_url in _discover_asset_urls_from_text(html_blob, page_url):
++                ensure_resource(asset_url)
++        for abs_url, entry in list(resources.items()):
++            if entry["local_path"].endswith((".css", ".js", ".mjs", ".json", ".txt")) and entry["disk_path"].exists():
++                try:
++                    blob = entry["disk_path"].read_text(encoding="utf-8", errors="ignore")
++                except Exception:
++                    blob = ""
++                for asset_url in _discover_asset_urls_from_text(blob, abs_url):
++                    ensure_resource(asset_url)
++
++        yield ev(
++            f"Cobertura inicial concluída: {len(crawl_order)} páginas e {len(resources)} recursos observados.",
++            progress=64,
++        )
++        if skipped_large:
++            yield ev(
++                f"{skipped_large} recursos grandes foram ignorados para evitar estouro de memória.",
++            )
++        if fetched_out_of_band:
++            yield ev(
++                f"{fetched_out_of_band} recursos adicionais foram baixados fora do fluxo do navegador para fechar dependências.",
++            )
++
++        page_local_map = {page_url: _page_local_path(page_url, root_url) for page_url in crawl_order}
++
++        yield ev("Fechando dependências de CSS e fontes...", progress=72)
++        css_urls = [
++            abs_url
++            for abs_url, entry in list(resources.items())
++            if entry["local_path"].endswith(".css") or "text/css" in entry["content_type"].lower()
++        ]
++        for css_url in css_urls:
++            ensure_resource(css_url)
++
++        yield ev("Reescrevendo páginas, rotas internas e assets locais...", progress=82)
++        processed_pages: dict[str, dict] = {}
++        for page_url in crawl_order:
++            local_path = page_local_map[page_url]
++            rewritten_html = _rewrite_document(
++                page_url,
++                pages_raw[page_url],
++                local_path,
++                root_url,
++                page_local_map,
++                resources,
++                ensure_resource,
++                unresolved_urls,
++                clean_scripts=options.get("clean", True),
++            )
++            title_match = re.search(r"<title>(.*?)</title>", rewritten_html, re.IGNORECASE | re.DOTALL)
++            processed_pages[page_url] = {
++                "local_path": local_path,
++                "html": rewritten_html,
++                "title": title_match.group(1).strip() if title_match else "",
++            }
++
++        yield ev("Consolidando manifesto e design system do site inteiro...", progress=90)
++        manifest = {
++            "root_url": root_url,
++            "captured_at": int(time.time()),
++            "page_count": len(processed_pages),
++            "asset_count": len(resources),
++            "pages": [
++                {
++                    "url": page_url,
++                    "local_path": data["local_path"],
++                    "title": data["title"],
++                }
++                for page_url, data in processed_pages.items()
++            ],
++            "assets": [
++                {
++                    "url": abs_url,
++                    "local_path": entry["local_path"],
++                    "content_type": entry["content_type"],
++                    "size": entry["size"],
++                }
++                for abs_url, entry in sorted(resources.items())
++            ],
++            "unresolved_urls": sorted(unresolved_urls),
++            "options": options,
++        }
++
++        ds_html = None
++        try:
++            from design_system_generator import generate_design_system
++
++            ds_html = generate_design_system(
++                {
++                    "root_url": root_url,
++                    "pages": processed_pages,
++                    "resources": {
++                        url_key: {
++                            "local_path": entry["local_path"],
++                            "content_type": entry["content_type"],
++                            "size": entry["size"],
++                        }
++                        for url_key, entry in resources.items()
++                    },
++                    "asset_root": str(temp_dir / "assets"),
++                    "manifest": manifest,
++                }
++            )
++            if ds_html and design_system_output_path:
++                design_system_output_path.write_text(ds_html, encoding="utf-8")
++            if ds_html:
++                yield ev("Design system gerado a partir das páginas e CSS reais capturados.", level="accent", progress=94)
++        except Exception as exc:
++            yield ev(f"Aviso: design system ignorado ({exc})")
++
++        total_files = len(resources) + len(processed_pages) + 1 + (1 if ds_html else 0)
++        yield ev(f"Empacotando site local com {len(processed_pages)} páginas...", progress=96)
++
++        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
++            for _, data in processed_pages.items():
++                zf.writestr(data["local_path"], data["html"])
++            zf.writestr("capture-manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
++            if ds_html:
++                zf.writestr("design-system.html", ds_html)
++            for entry in resources.values():
++                if entry["disk_path"].exists():
++                    zf.write(entry["disk_path"], arcname=entry["local_path"])
++
++        size_kb = zip_path.stat().st_size // 1024
++        unresolved_note = f" · {len(unresolved_urls)} referências remotas ainda sem fechamento" if unresolved_urls else ""
++        yield ev(
++            (
++                f"Concluído. ZIP com {len(processed_pages)} páginas locais, "
++                f"{len(resources)} assets e manifesto ({size_kb} KB){unresolved_note}."
++            ),
++            level="success",
++            progress=100,
++        )
++        yield {
++            "type": "summary",
++            "files": total_files,
++            "assets": len(resources),
++            "pages": len(processed_pages),
++            "design_system": bool(ds_html),
++            "unresolved": len(unresolved_urls),
++            "elapsed_ms": int((time.monotonic() - started_at) * 1000),
++        }
+diff -ruN /mnt/data/origv2/src/pyproject.toml /mnt/data/projectv2/src/pyproject.toml
+--- /mnt/data/origv2/src/pyproject.toml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/pyproject.toml	2026-04-10 01:16:20.000000000 +0000
+@@ -0,0 +1,16 @@
++[project]
++name = "capturar"
++version = "1.0.0"
++description = "Website Downloader — replica completa com JS renderizado"
++requires-python = ">=3.11"
++dependencies = [
++    "flask>=3.0",
++    "playwright>=1.44",
++    "beautifulsoup4>=4.12",
++    "lxml>=5.2",
++    "gunicorn>=22.0",
++]
++
++[build-system]
++requires = ["hatchling"]
++build-backend = "hatchling.build"
+diff -ruN /mnt/data/origv2/src/railway.toml /mnt/data/projectv2/src/railway.toml
+--- /mnt/data/origv2/src/railway.toml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/railway.toml	2026-04-10 21:01:20.000000000 +0000
+@@ -0,0 +1,9 @@
++[build]
++builder = "DOCKERFILE"
++dockerfilePath = "Dockerfile"
++
++[deploy]
++healthcheckPath = "/healthz"
++healthcheckTimeout = 300
++restartPolicyType = "ON_FAILURE"
++restartPolicyMaxRetries = 5
+diff -ruN /mnt/data/origv2/src/render.yaml /mnt/data/projectv2/src/render.yaml
+--- /mnt/data/origv2/src/render.yaml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/render.yaml	2026-04-10 01:16:34.000000000 +0000
+@@ -0,0 +1,15 @@
++services:
++  - type: web
++    name: capturar
++    runtime: docker
++    plan: starter
++    dockerfilePath: ./Dockerfile
++    envVars:
++      - key: PORT
++        value: 5001
++      - key: FLASK_ENV
++        value: production
++    disk:
++      name: downloads
++      mountPath: /app/downloads
++      sizeGB: 1
+diff -ruN /mnt/data/origv2/src/requirements.txt /mnt/data/projectv2/src/requirements.txt
+--- /mnt/data/origv2/src/requirements.txt	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/requirements.txt	2026-04-10 01:16:23.000000000 +0000
+@@ -0,0 +1,5 @@
++flask>=3.0
++playwright>=1.44
++beautifulsoup4>=4.12
++lxml>=5.2
++gunicorn>=22.0
+diff -ruN /mnt/data/origv2/src/templates/index.html /mnt/data/projectv2/src/templates/index.html
+--- /mnt/data/origv2/src/templates/index.html	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/projectv2/src/templates/index.html	2026-04-10 22:50:36.689390200 +0000
+@@ -0,0 +1,1000 @@
++<!DOCTYPE html>
++<html lang="pt-BR">
++<head>
++<meta charset="UTF-8">
++<meta name="viewport" content="width=device-width, initial-scale=1.0">
++<title>Capturar — Website Downloader</title>
++<link rel="preconnect" href="https://fonts.googleapis.com">
++<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
++<style>
++  :root {
++    --bg: #0a0a0a;
++    --surface: #111111;
++    --surface2: #181818;
++    --border: #222222;
++    --border-active: #3a3a3a;
++    --text: #f0ede6;
++    --text-muted: #666;
++    --text-dim: #333;
++    --accent: #e8ff47;
++    --accent-dim: rgba(232, 255, 71, 0.08);
++    --accent-glow: rgba(232, 255, 71, 0.15);
++    --danger: #ff4757;
++    --success: #00d68f;
++    --mono: 'DM Mono', monospace;
++    --sans: 'Syne', sans-serif;
++  }
++
++  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
++
++  html { scroll-behavior: smooth; }
++
++  body {
++    background: var(--bg);
++    color: var(--text);
++    font-family: var(--mono);
++    min-height: 100vh;
++    overflow-x: hidden;
++    cursor: none;
++  }
++
++  /* Custom cursor */
++  .cursor {
++    position: fixed;
++    width: 10px;
++    height: 10px;
++    background: var(--accent);
++    border-radius: 50%;
++    pointer-events: none;
++    z-index: 9999;
++    transform: translate(-50%, -50%);
++    transition: transform 0.08s ease, width 0.2s ease, height 0.2s ease, opacity 0.2s ease;
++    mix-blend-mode: difference;
++  }
++
++  .cursor-ring {
++    position: fixed;
++    width: 36px;
++    height: 36px;
++    border: 1px solid rgba(232, 255, 71, 0.4);
++    border-radius: 50%;
++    pointer-events: none;
++    z-index: 9998;
++    transform: translate(-50%, -50%);
++    transition: transform 0.18s ease, width 0.25s ease, height 0.25s ease, border-color 0.2s ease;
++  }
++
++  .cursor.hovered { width: 6px; height: 6px; }
++  .cursor-ring.hovered { width: 50px; height: 50px; border-color: var(--accent); }
++
++  /* Grain overlay */
++  body::before {
++    content: '';
++    position: fixed;
++    inset: 0;
++    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='1'/%3E%3C/svg%3E");
++    opacity: 0.025;
++    pointer-events: none;
++    z-index: 100;
++  }
++
++  /* Grid background */
++  body::after {
++    content: '';
++    position: fixed;
++    inset: 0;
++    background-image:
++      linear-gradient(var(--border) 1px, transparent 1px),
++      linear-gradient(90deg, var(--border) 1px, transparent 1px);
++    background-size: 60px 60px;
++    opacity: 0.3;
++    pointer-events: none;
++    z-index: 0;
++  }
++
++  /* Layout */
++  .wrap {
++    position: relative;
++    z-index: 1;
++    max-width: 900px;
++    margin: 0 auto;
++    padding: 0 32px;
++  }
++
++  /* Header */
++  header {
++    padding: 40px 0 0;
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++  }
++
++  .logo {
++    font-family: var(--sans);
++    font-size: 13px;
++    font-weight: 700;
++    letter-spacing: 0.12em;
++    text-transform: uppercase;
++    color: var(--text-muted);
++    display: flex;
++    align-items: center;
++    gap: 10px;
++  }
++
++  .logo-dot {
++    width: 6px;
++    height: 6px;
++    background: var(--accent);
++    border-radius: 50%;
++    animation: pulse 2s ease-in-out infinite;
++  }
++
++  @keyframes pulse {
++    0%, 100% { opacity: 1; transform: scale(1); }
++    50% { opacity: 0.5; transform: scale(0.8); }
++  }
++
++  .status-pill {
++    font-size: 11px;
++    font-family: var(--mono);
++    color: var(--text-muted);
++    border: 1px solid var(--border);
++    padding: 5px 12px;
++    border-radius: 100px;
++    display: flex;
++    align-items: center;
++    gap: 6px;
++  }
++
++  .status-dot {
++    width: 5px;
++    height: 5px;
++    background: var(--success);
++    border-radius: 50%;
++  }
++
++  /* Hero */
++  .hero {
++    padding: 80px 0 60px;
++  }
++
++  .tag {
++    display: inline-flex;
++    align-items: center;
++    gap: 8px;
++    font-size: 11px;
++    font-family: var(--mono);
++    color: var(--accent);
++    border: 1px solid rgba(232, 255, 71, 0.2);
++    background: var(--accent-dim);
++    padding: 6px 14px;
++    border-radius: 4px;
++    margin-bottom: 32px;
++    letter-spacing: 0.08em;
++    text-transform: uppercase;
++  }
++
++  h1 {
++    font-family: var(--sans);
++    font-size: clamp(52px, 8vw, 88px);
++    font-weight: 800;
++    line-height: 0.95;
++    letter-spacing: -0.03em;
++    color: var(--text);
++    margin-bottom: 24px;
++  }
++
++  h1 em {
++    font-style: normal;
++    color: var(--accent);
++  }
++
++  .subtitle {
++    font-size: 14px;
++    color: var(--text-muted);
++    line-height: 1.7;
++    max-width: 460px;
++    letter-spacing: 0.01em;
++  }
++
++  /* Input area */
++  .input-section {
++    margin: 48px 0;
++  }
++
++  .input-label {
++    font-size: 11px;
++    text-transform: uppercase;
++    letter-spacing: 0.12em;
++    color: var(--text-dim);
++    margin-bottom: 12px;
++    display: block;
++  }
++
++  .input-wrapper {
++    position: relative;
++    display: flex;
++    align-items: stretch;
++    background: var(--surface);
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    transition: border-color 0.2s ease, box-shadow 0.2s ease;
++    overflow: hidden;
++  }
++
++  .input-wrapper:focus-within {
++    border-color: var(--accent);
++    box-shadow: 0 0 0 3px var(--accent-glow), inset 0 0 40px rgba(232, 255, 71, 0.02);
++  }
++
++  .url-prefix {
++    display: flex;
++    align-items: center;
++    padding: 0 16px;
++    font-size: 13px;
++    color: var(--text-dim);
++    background: var(--surface2);
++    border-right: 1px solid var(--border);
++    white-space: nowrap;
++    user-select: none;
++  }
++
++  input[type="url"] {
++    flex: 1;
++    background: transparent;
++    border: none;
++    outline: none;
++    font-family: var(--mono);
++    font-size: 14px;
++    color: var(--text);
++    padding: 18px 20px;
++    caret-color: var(--accent);
++    min-width: 0;
++  }
++
++  input[type="url"]::placeholder {
++    color: var(--text-dim);
++  }
++
++  .btn-download {
++    display: flex;
++    align-items: center;
++    gap: 10px;
++    background: var(--accent);
++    color: #000;
++    border: none;
++    font-family: var(--sans);
++    font-size: 13px;
++    font-weight: 700;
++    letter-spacing: 0.06em;
++    text-transform: uppercase;
++    padding: 0 28px;
++    cursor: none;
++    transition: opacity 0.15s ease, transform 0.1s ease;
++    white-space: nowrap;
++    flex-shrink: 0;
++  }
++
++  .btn-download:hover { opacity: 0.88; }
++  .btn-download:active { transform: scale(0.98); }
++  .btn-download:disabled { opacity: 0.4; cursor: not-allowed; }
++
++  .btn-download svg {
++    transition: transform 0.2s ease;
++  }
++
++  .btn-download:hover svg {
++    transform: translateY(2px);
++  }
++
++  /* Options */
++  .options-row {
++    display: flex;
++    align-items: center;
++    gap: 24px;
++    margin-top: 16px;
++    flex-wrap: wrap;
++  }
++
++  .option-toggle {
++    display: flex;
++    align-items: center;
++    gap: 8px;
++    font-size: 12px;
++    color: var(--text-muted);
++    cursor: none;
++    user-select: none;
++  }
++
++  .option-toggle input[type="checkbox"] {
++    appearance: none;
++    width: 32px;
++    height: 18px;
++    background: var(--surface2);
++    border: 1px solid var(--border-active);
++    border-radius: 100px;
++    cursor: none;
++    position: relative;
++    transition: background 0.2s ease, border-color 0.2s ease;
++    flex-shrink: 0;
++  }
++
++  .option-toggle input[type="checkbox"]::after {
++    content: '';
++    position: absolute;
++    width: 12px;
++    height: 12px;
++    background: var(--text-muted);
++    border-radius: 50%;
++    top: 2px;
++    left: 2px;
++    transition: transform 0.2s ease, background 0.2s ease;
++  }
++
++  .option-toggle input[type="checkbox"]:checked {
++    background: var(--accent-dim);
++    border-color: var(--accent);
++  }
++
++  .option-toggle input[type="checkbox"]:checked::after {
++    transform: translateX(14px);
++    background: var(--accent);
++  }
++
++  /* Progress / Log area */
++  .progress-section {
++    display: none;
++    margin: 40px 0;
++    opacity: 0;
++    transform: translateY(12px);
++    transition: opacity 0.3s ease, transform 0.3s ease;
++  }
++
++  .progress-section.visible {
++    display: block;
++  }
++
++  .progress-section.shown {
++    opacity: 1;
++    transform: translateY(0);
++  }
++
++  .progress-header {
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    margin-bottom: 16px;
++  }
++
++  .progress-label {
++    font-size: 11px;
++    text-transform: uppercase;
++    letter-spacing: 0.12em;
++    color: var(--text-dim);
++  }
++
++  .progress-pct {
++    font-size: 13px;
++    color: var(--accent);
++    font-family: var(--mono);
++  }
++
++  .progress-bar-track {
++    height: 2px;
++    background: var(--surface2);
++    border-radius: 2px;
++    margin-bottom: 20px;
++    overflow: hidden;
++  }
++
++  .progress-bar-fill {
++    height: 100%;
++    background: var(--accent);
++    border-radius: 2px;
++    width: 0%;
++    transition: width 0.4s ease;
++    box-shadow: 0 0 12px var(--accent-glow);
++  }
++
++  .log-box {
++    background: var(--surface);
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    padding: 20px;
++    height: 200px;
++    overflow-y: auto;
++    font-size: 12px;
++    line-height: 1.8;
++    scrollbar-width: thin;
++    scrollbar-color: var(--border) transparent;
++  }
++
++  .log-box::-webkit-scrollbar { width: 4px; }
++  .log-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
++
++  .log-line {
++    display: flex;
++    gap: 12px;
++    align-items: flex-start;
++    opacity: 0;
++    animation: logIn 0.25s ease forwards;
++  }
++
++  @keyframes logIn {
++    from { opacity: 0; transform: translateX(-6px); }
++    to { opacity: 1; transform: translateX(0); }
++  }
++
++  .log-time { color: var(--text-dim); flex-shrink: 0; }
++  .log-msg { color: var(--text-muted); }
++  .log-msg.success { color: var(--success); }
++  .log-msg.error { color: var(--danger); }
++  .log-msg.accent { color: var(--accent); }
++
++  /* Download result */
++  .result-section {
++    display: none;
++    margin: 32px 0;
++  }
++
++  .result-card {
++    background: var(--surface);
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    padding: 28px 32px;
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    gap: 24px;
++    animation: slideUp 0.35s ease forwards;
++  }
++
++  @keyframes slideUp {
++    from { opacity: 0; transform: translateY(16px); }
++    to { opacity: 1; transform: translateY(0); }
++  }
++
++  .result-info { flex: 1; min-width: 0; }
++
++  .result-filename {
++    font-size: 15px;
++    font-weight: 500;
++    color: var(--text);
++    font-family: var(--mono);
++    margin-bottom: 6px;
++    white-space: nowrap;
++    overflow: hidden;
++    text-overflow: ellipsis;
++  }
++
++  .result-meta {
++    font-size: 12px;
++    color: var(--text-muted);
++    display: flex;
++    gap: 16px;
++  }
++
++  .result-meta span {
++    display: flex;
++    align-items: center;
++    gap: 5px;
++  }
++
++  .result-actions {
++    display: flex;
++    align-items: center;
++    gap: 12px;
++    flex-wrap: wrap;
++  }
++
++  .btn-get {
++    display: inline-flex;
++    align-items: center;
++    justify-content: center;
++    gap: 10px;
++    background: var(--accent);
++    color: #000;
++    border: none;
++    font-family: var(--sans);
++    font-size: 13px;
++    font-weight: 700;
++    letter-spacing: 0.06em;
++    text-transform: uppercase;
++    padding: 14px 24px;
++    border-radius: 6px;
++    cursor: none;
++    text-decoration: none;
++    transition: opacity 0.15s;
++    flex-shrink: 0;
++    min-width: 176px;
++  }
++
++  .btn-get.secondary {
++    background: transparent;
++    color: var(--text);
++    border: 1px solid var(--border-active);
++  }
++
++  .btn-get:hover { opacity: 0.85; }
++
++
++  /* Features */
++  .features {
++    margin: 80px 0;
++    padding-top: 48px;
++    border-top: 1px solid var(--border);
++  }
++
++  .features-grid {
++    display: grid;
++    grid-template-columns: repeat(3, 1fr);
++    gap: 1px;
++    background: var(--border);
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    overflow: hidden;
++  }
++
++  .feature-card {
++    background: var(--bg);
++    padding: 28px 24px;
++    transition: background 0.2s ease;
++  }
++
++  .feature-card:hover { background: var(--surface); }
++
++  .feature-icon {
++    font-size: 20px;
++    margin-bottom: 14px;
++    display: block;
++  }
++
++  .feature-title {
++    font-family: var(--sans);
++    font-size: 14px;
++    font-weight: 700;
++    color: var(--text);
++    margin-bottom: 8px;
++    letter-spacing: -0.01em;
++  }
++
++  .feature-desc {
++    font-size: 12px;
++    color: var(--text-muted);
++    line-height: 1.7;
++  }
++
++  /* Footer */
++  footer {
++    border-top: 1px solid var(--border);
++    padding: 28px 0;
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    font-size: 11px;
++    color: var(--text-dim);
++  }
++
++  footer a {
++    color: var(--text-dim);
++    text-decoration: none;
++    transition: color 0.15s;
++  }
++
++  footer a:hover { color: var(--accent); }
++
++  /* Error state */
++  .error-toast {
++    position: fixed;
++    bottom: 32px;
++    left: 50%;
++    transform: translateX(-50%) translateY(100px);
++    background: var(--danger);
++    color: #fff;
++    padding: 12px 24px;
++    border-radius: 6px;
++    font-size: 13px;
++    font-family: var(--mono);
++    z-index: 200;
++    transition: transform 0.3s ease;
++    pointer-events: none;
++  }
++
++  .error-toast.show { transform: translateX(-50%) translateY(0); }
++
++  /* Responsive */
++  @media (max-width: 680px) {
++    .features-grid { grid-template-columns: 1fr; }
++    h1 { font-size: 44px; }
++    .btn-download { padding: 0 18px; font-size: 12px; }
++    .input-wrapper { flex-wrap: wrap; }
++    .btn-download { width: 100%; justify-content: center; padding: 16px; }
++    .url-prefix { display: none; }
++    .options-row { gap: 16px; }
++    .result-card { flex-direction: column; align-items: flex-start; }
++    .result-actions { width: 100%; flex-direction: column; }
++    .btn-get { width: 100%; justify-content: center; }
++  }
++
++  /* Spinner */
++  .spin {
++    display: inline-block;
++    width: 14px;
++    height: 14px;
++    border: 2px solid rgba(0,0,0,0.2);
++    border-top-color: #000;
++    border-radius: 50%;
++    animation: spin 0.7s linear infinite;
++  }
++
++  @keyframes spin {
++    to { transform: rotate(360deg); }
++  }
++
++  /* Stagger entrance */
++  .stagger > * {
++    opacity: 0;
++    transform: translateY(20px);
++    animation: fadeUp 0.5s ease forwards;
++  }
++
++  .stagger > *:nth-child(1) { animation-delay: 0.05s; }
++  .stagger > *:nth-child(2) { animation-delay: 0.12s; }
++  .stagger > *:nth-child(3) { animation-delay: 0.2s; }
++  .stagger > *:nth-child(4) { animation-delay: 0.28s; }
++
++  @keyframes fadeUp {
++    to { opacity: 1; transform: translateY(0); }
++  }
++</style>
++</head>
++<body>
++
++<div class="cursor" id="cursor"></div>
++<div class="cursor-ring" id="cursorRing"></div>
++<div class="error-toast" id="errorToast"></div>
++
++<div class="wrap">
++
++  <header>
++    <div class="logo">
++      <span class="logo-dot"></span>
++      Capturar
++    </div>
++    <div class="status-pill">
++      <span class="status-dot"></span>
++      sistema operacional
++    </div>
++  </header>
++
++  <section class="hero stagger">
++    <div class="tag">⬡ website downloader v5</div>
++    <h1>Baixe<br>um<br><em>site.</em></h1>
++    <p class="subtitle">Captura páginas same-origin, assets locais, manifesto de integridade e um design system derivado do bundle real. Funciona melhor em sites públicos sem autenticação.</p>
++  </section>
++
++  <section class="input-section">
++    <label class="input-label" for="urlInput">// URL do site</label>
++    <div class="input-wrapper" id="inputWrapper">
++      <span class="url-prefix">https://</span>
++      <input
++        type="url"
++        id="urlInput"
++        placeholder="exemplo.com.br"
++        autocomplete="off"
++        spellcheck="false"
++      />
++      <button class="btn-download" id="btnDownload" onclick="startDownload()">
++        <span id="btnLabel">Capturar</span>
++        <svg id="btnIcon" width="14" height="14" viewBox="0 0 14 14" fill="none">
++          <path d="M7 1v8M4 7l3 3 3-3M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
++        </svg>
++      </button>
++    </div>
++
++    <div class="options-row">
++      <label class="option-toggle">
++        <input type="checkbox" id="optJS" checked>
++        <span>Renderizar JavaScript</span>
++      </label>
++      <label class="option-toggle">
++        <input type="checkbox" id="optLazy" checked>
++        <span>Capturar lazy loading</span>
++      </label>
++      <label class="option-toggle">
++        <input type="checkbox" id="optClean">
++        <span>Remover scripts problemáticos</span>
++      </label>
++    </div>
++  </section>
++
++  <section class="progress-section" id="progressSection">
++    <div class="progress-header">
++      <span class="progress-label">// progresso</span>
++      <span class="progress-pct" id="progressPct">0%</span>
++    </div>
++    <div class="progress-bar-track">
++      <div class="progress-bar-fill" id="progressBar"></div>
++    </div>
++    <div class="log-box" id="logBox"></div>
++  </section>
++
++  <section class="result-section" id="resultSection">
++    <div class="result-card">
++      <div class="result-info">
++        <div class="result-filename" id="resultFilename">site-replica.zip</div>
++        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-family:var(--mono)">inclui múltiplas páginas locais + assets/ + capture-manifest.json e, quando disponível, design-system.html</div>
++        <div class="result-meta">
++          <span>
++            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
++              <path d="M10 5H7V2" stroke="currentColor" stroke-linecap="round"/>
++              <path d="M2 10l8-8" stroke="currentColor" stroke-linecap="round"/>
++            </svg>
++            <span id="resultSize">—</span>
++          </span>
++          <span>
++            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
++              <rect x="1" y="1" width="10" height="10" rx="2" stroke="currentColor"/>
++              <path d="M4 6h4M6 4v4" stroke="currentColor" stroke-linecap="round"/>
++            </svg>
++            <span id="resultFiles">—</span> arquivos
++          </span>
++          <span>
++            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
++              <circle cx="6" cy="6" r="5" stroke="currentColor"/>
++              <path d="M6 3v3l2 2" stroke="currentColor" stroke-linecap="round"/>
++            </svg>
++            <span id="resultTime">—</span>
++          </span>
++        </div>
++      </div>
++      <div class="result-actions">
++        <a class="btn-get secondary" id="designSystemLink" href="#" target="_blank" rel="noopener" style="display:none">
++          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
++            <path d="M2 2h10v10H2z" stroke="currentColor" stroke-width="1.2"/>
++            <path d="M4 5h6M4 7h6M4 9h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
++          </svg>
++          Abrir Design System
++        </a>
++        <a class="btn-get" id="resultLink" href="#" download>
++          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
++            <path d="M7 1v8M4 7l3 3 3-3M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
++          </svg>
++          Baixar ZIP
++        </a>
++      </div>
++    </div>
++  </section>
++
++  <section class="features">
++    <div class="features-grid">
++      <div class="feature-card">
++        <span class="feature-icon">🎭</span>
++        <div class="feature-title">JS real renderizado</div>
++        <div class="feature-desc">Usa Playwright + Chromium para executar o JavaScript antes da captura. Funciona melhor em páginas públicas, não autenticadas.</div>
++      </div>
++      <div class="feature-card">
++        <span class="feature-icon">📦</span>
++        <div class="feature-title">Site local em ZIP</div>
++        <div class="feature-desc">Captura várias páginas same-origin, reescreve rotas internas e inclui um manifesto explícito com pendências remotas.</div>
++      </div>
++      <div class="feature-card">
++        <span class="feature-icon">🖼️</span>
++        <div class="feature-title">Lazy load capturado</div>
++        <div class="feature-desc">Rola a página automaticamente para aumentar a chance de carregar imagens e blocos sob demanda antes da exportação.</div>
++      </div>
++      <div class="feature-card">
++        <span class="feature-icon">🧹</span>
++        <div class="feature-title">Fechamento de dependências</div>
++        <div class="feature-desc">Também busca referências de CSS, @import e url(...) para reduzir dependências remotas residuais no pacote final.</div>
++      </div>
++      <div class="feature-card">
++        <span class="feature-icon">⚡</span>
++        <div class="feature-title">Logs em tempo real</div>
++        <div class="feature-desc">Acompanhe cada etapa do processo via Server-Sent Events. Sem refresh, sem espera no escuro.</div>
++      </div>
++      <div class="feature-card">
++        <span class="feature-icon">🗑️</span>
++        <div class="feature-title">Retenção curta</div>
++        <div class="feature-desc">Os arquivos expiram automaticamente depois de alguns minutos. O armazenamento é temporário e voltado ao download imediato.</div>
++      </div>
++    </div>
++  </section>
++
++  <footer>
++    <span>Capturar · Website Downloader</span>
++    <span>Uso pessoal e educacional</span>
++  </footer>
++
++</div>
++
++<script>
++  // Custom cursor
++  const cursor = document.getElementById('cursor');
++  const ring = document.getElementById('cursorRing');
++  let mx = 0, my = 0, rx = 0, ry = 0;
++
++  document.addEventListener('mousemove', e => {
++    mx = e.clientX; my = e.clientY;
++    cursor.style.left = mx + 'px';
++    cursor.style.top = my + 'px';
++  });
++
++  function animRing() {
++    rx += (mx - rx) * 0.12;
++    ry += (my - ry) * 0.12;
++    ring.style.left = rx + 'px';
++    ring.style.top = ry + 'px';
++    requestAnimationFrame(animRing);
++  }
++  animRing();
++
++  document.querySelectorAll('a, button, input, label, .feature-card').forEach(el => {
++    el.addEventListener('mouseenter', () => { cursor.classList.add('hovered'); ring.classList.add('hovered'); });
++    el.addEventListener('mouseleave', () => { cursor.classList.remove('hovered'); ring.classList.remove('hovered'); });
++  });
++
++  // State
++  let isRunning = false;
++  let startTime = null;
++  let eventSource = null;
++
++  function log(msg, type = '') {
++    const box = document.getElementById('logBox');
++    const t = new Date().toTimeString().slice(0, 8);
++    const line = document.createElement('div');
++    line.className = 'log-line';
++    line.innerHTML = `<span class="log-time">${t}</span><span class="log-msg ${type}">${msg}</span>`;
++    box.appendChild(line);
++    box.scrollTop = box.scrollHeight;
++  }
++
++  function setProgress(pct) {
++    document.getElementById('progressBar').style.width = pct + '%';
++    document.getElementById('progressPct').textContent = Math.round(pct) + '%';
++  }
++
++  function showSection(id) {
++    const el = document.getElementById(id);
++    el.style.display = 'block';
++    requestAnimationFrame(() => el.classList.add('shown'));
++  }
++
++  function showError(msg) {
++    const toast = document.getElementById('errorToast');
++    toast.textContent = '✕ ' + msg;
++    toast.classList.add('show');
++    setTimeout(() => toast.classList.remove('show'), 4000);
++  }
++
++  function resetBtn() {
++    const btn = document.getElementById('btnDownload');
++    const label = document.getElementById('btnLabel');
++    const icon = document.getElementById('btnIcon');
++    btn.disabled = false;
++    label.textContent = 'Capturar';
++    icon.innerHTML = '<path d="M7 1v8M4 7l3 3 3-3M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>';
++  }
++
++  function getUrl() {
++    let v = document.getElementById('urlInput').value.trim();
++    if (!v) return null;
++    if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
++    return v;
++  }
++
++  function formatTime(ms) {
++    if (ms < 1000) return ms + 'ms';
++    return (ms / 1000).toFixed(1) + 's';
++  }
++
++  function formatBytes(bytes) {
++    if (!bytes) return '—';
++    if (bytes < 1024) return bytes + ' B';
++    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
++    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
++  }
++
++  async function startDownload() {
++    if (isRunning) return;
++    const url = getUrl();
++    if (!url) { showError('Cole uma URL válida primeiro.'); return; }
++
++    try { new URL(url); } catch { showError('URL inválida.'); return; }
++
++    isRunning = true;
++    startTime = Date.now();
++
++    // Reset UI
++    document.getElementById('logBox').innerHTML = '';
++    document.getElementById('resultSection').style.display = 'none';
++    setProgress(0);
++
++    // Show progress
++    const ps = document.getElementById('progressSection');
++    ps.style.display = 'block';
++    ps.classList.remove('shown');
++    requestAnimationFrame(() => ps.classList.add('shown'));
++
++    // Update btn
++    const btn = document.getElementById('btnDownload');
++    const label = document.getElementById('btnLabel');
++    const icon = document.getElementById('btnIcon');
++    btn.disabled = true;
++    label.textContent = 'Capturando';
++    icon.innerHTML = '<div class="spin"></div>';
++
++    const hostname = new URL(url).hostname.replace('www.', '');
++
++    // Conecta ao backend real via SSE
++    const params = new URLSearchParams({
++      url,
++      js: document.getElementById('optJS').checked,
++      lazy: document.getElementById('optLazy').checked,
++      clean: document.getElementById('optClean').checked,
++    });
++    eventSource = new EventSource(`/download?${params}`);
++
++    eventSource.onmessage = e => {
++      const data = JSON.parse(e.data);
++      if (data.type === 'log') { log(data.msg, data.level || ''); }
++      if (data.progress !== undefined) { setProgress(data.progress); }
++      if (data.type === 'done') {
++        finishDownload(data, hostname);
++        eventSource.close();
++      }
++      if (data.type === 'error') {
++        showError(data.msg);
++        resetBtn();
++        isRunning = false;
++        eventSource.close();
++      }
++    };
++    eventSource.onerror = () => {
++      if (!isRunning) return;
++      showError('Falha na conexão com o servidor.');
++      resetBtn();
++      isRunning = false;
++      eventSource && eventSource.close();
++    };
++  }
++
++  function finishDownload(data, hostname) {
++    const elapsed = data.elapsed || (Date.now() - startTime);
++    document.getElementById('resultFilename').textContent = data.filename || `${hostname}.zip`;
++    document.getElementById('resultSize').textContent = formatBytes(data.size);
++    document.getElementById('resultFiles').textContent = data.files || '—';
++    document.getElementById('resultTime').textContent = formatTime(elapsed);
++
++    if (data.downloadUrl) {
++      document.getElementById('resultLink').href = data.downloadUrl;
++    }
++
++    const dsLink = document.getElementById('designSystemLink');
++    if (data.designSystemUrl) {
++      dsLink.href = data.designSystemUrl;
++      dsLink.style.display = 'inline-flex';
++    } else {
++      dsLink.href = '#';
++      dsLink.style.display = 'none';
++    }
++    const detailBits = [];
++    if (data.pages) detailBits.push(`${data.pages} páginas`);
++    if (data.unresolved !== undefined && data.unresolved !== null) detailBits.push(`${data.unresolved} remotos pendentes`);
++    const helper = document.querySelector('.result-info div[style]');
++    if (helper && detailBits.length) {
++      helper.textContent = `inclui múltiplas páginas locais + assets/ + capture-manifest.json · ${detailBits.join(' · ')}${data.designSystemUrl ? ' · design-system.html' : ''}`;
++    }
++
++    document.getElementById('resultSection').style.display = 'block';
++    resetBtn();
++    isRunning = false;
++  }
++
++  // Allow Enter key
++  document.getElementById('urlInput').addEventListener('keydown', e => {
++    if (e.key === 'Enter') startDownload();
++  });
++</script>
++</body>
++</html>

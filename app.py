@@ -105,7 +105,7 @@ def download():
     options = {
         "js": request.args.get("js", "true") == "true",
         "lazy": request.args.get("lazy", "true") == "true",
-        "clean": request.args.get("clean", "true") == "true",
+        "clean": request.args.get("clean", "false") == "true",
     }
 
     job_id = str(uuid.uuid4())[:8]
@@ -133,8 +133,7 @@ def download():
                 {
                     "type": "log",
                     "msg": (
-                        f"Opções: JS={options['js']} · Lazy={options['lazy']} · "
-                        f"Limpeza={options['clean']}"
+                        f"Opções: JS={options['js']} · Lazy={options['lazy']} · Preservar runtime={not options['clean']}"
                     ),
                 }
             )

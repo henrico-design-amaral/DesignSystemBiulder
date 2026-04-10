@@ -17,11 +17,11 @@ from urllib.parse import urldefrag, urljoin, urlparse
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-SCROLL_DELAY = 0.35
-SCROLL_STEPS = 7
-WAIT_AFTER_LOAD_MS = 2_000
-PAGE_TIMEOUT_MS = 45_000
-POST_SCROLL_WAIT_MS = 900
+SCROLL_DELAY = 0.45
+SCROLL_STEPS = 10
+WAIT_AFTER_LOAD_MS = 2_500
+PAGE_TIMEOUT_MS = 55_000
+POST_SCROLL_WAIT_MS = 1_200
 REQUEST_TIMEOUT_SECONDS = 25
 
 MAX_ASSET_BYTES = max(256_000, int(os.getenv("MAX_ASSET_BYTES", str(25 * 1024 * 1024))))
@@ -89,6 +89,9 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0.0.0 Safari/537.36"
 )
+
+ABSOLUTE_ASSET_PATTERN = re.compile(r"(?:https?:)?//[^\s'\")>]+\.(?:png|jpe?g|gif|webp|svg|avif|woff2?|ttf|otf|mp4|webm)(?:\?[^\s'\")>]+)?", re.IGNORECASE)
+RELATIVE_ASSET_PATTERN = re.compile(r"(?:src|href|poster)=[\"']([^\"']+\.(?:png|jpe?g|gif|webp|svg|avif|woff2?|ttf|otf|mp4|webm)(?:\?[^\"']+)?)", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +266,67 @@ def _fetch_url_bytes(abs_url: str) -> tuple[bytes | None, str]:
         return None, ""
 
 
+
+
+def _discover_asset_urls_from_text(text: str, base_url: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in ABSOLUTE_ASSET_PATTERN.finditer(text or ""):
+        raw = match.group(0)
+        if raw.startswith("//"):
+            raw = "https:" + raw
+        absolute = _clean_url(raw)
+        if absolute and absolute not in seen:
+            seen.add(absolute)
+            found.append(absolute)
+    for match in RELATIVE_ASSET_PATTERN.finditer(text or ""):
+        absolute = _clean_url(urljoin(base_url, match.group(1)))
+        if absolute and absolute not in seen:
+            seen.add(absolute)
+            found.append(absolute)
+    return found
+
+
+def _extract_runtime_asset_urls(page) -> list[str]:
+    try:
+        values = page.evaluate(
+            """
+            () => {
+              const found = new Set();
+              const push = (value) => {
+                if (!value || typeof value !== 'string') return;
+                const v = value.trim();
+                if (!v || v.startsWith('data:') || v.startsWith('blob:') || v.startsWith('javascript:')) return;
+                found.add(v);
+              };
+              document.querySelectorAll('*').forEach((el) => {
+                if (el.currentSrc) push(el.currentSrc);
+                ['src','href','poster','data-src','data-bg','data-background-image'].forEach((attr) => push(el.getAttribute(attr)));
+                const srcset = el.getAttribute('srcset');
+                if (srcset) {
+                  srcset.split(',').forEach((part) => {
+                    const src = part.trim().split(/\s+/)[0];
+                    push(src);
+                  });
+                }
+                const style = window.getComputedStyle(el);
+                const bg = style && style.backgroundImage;
+                if (bg && bg !== 'none') {
+                  bg.split(',').forEach((entry) => {
+                    const m = entry.match(/url\(["']?(.+?)["']?\)/);
+                    if (m && m[1]) push(m[1]);
+                  });
+                }
+              });
+              performance.getEntriesByType('resource').forEach((entry) => push(entry.name));
+              return Array.from(found);
+            }
+            """
+        ) or []
+        return [u for u in values if isinstance(u, str)]
+    except Exception:
+        return []
+
 # ---------------------------------------------------------------------------
 # Rewriting helpers
 # ---------------------------------------------------------------------------
@@ -355,6 +419,21 @@ def _rewrite_document(
                 else:
                     new_parts.append(part)
             tag["srcset"] = ", ".join(new_parts)
+
+    for tag in soup.find_all(True):
+        for attr, raw_value in list(tag.attrs.items()):
+            if attr in {'class', 'style', 'srcset'}:
+                continue
+            if isinstance(raw_value, list) or not isinstance(raw_value, str):
+                continue
+            value = raw_value.strip()
+            if not value or value.startswith(('data:', '#', 'blob:', 'javascript:', 'mailto:', 'tel:')):
+                continue
+            if '://' not in value and not value.startswith(('/', './', '../')):
+                continue
+            rewritten = local_for_resource(value)
+            if rewritten:
+                tag[attr] = rewritten
 
     for node in soup.find_all(style=True):
         node["style"] = _rewrite_css_blob(
@@ -493,7 +572,7 @@ def download_site(
             return local_path
 
         yield ev(
-            f"Iniciando captura same-origin: até {MAX_CRAWL_PAGES} páginas e profundidade {MAX_CRAWL_DEPTH}.",
+            f"Iniciando captura same-origin: até {MAX_CRAWL_PAGES} páginas, profundidade {MAX_CRAWL_DEPTH} e fechamento máximo de assets.",
             progress=6,
         )
 
@@ -558,7 +637,10 @@ def download_site(
                             time.sleep(SCROLL_DELAY)
                         page.evaluate("window.scrollTo(0, 0)")
                         page.wait_for_timeout(POST_SCROLL_WAIT_MS)
+                    runtime_asset_urls = _extract_runtime_asset_urls(page)
                     html_content = page.content()
+                    for asset_url in runtime_asset_urls:
+                        ensure_resource(_clean_url(urljoin(current_url, asset_url)))
                 except Exception as exc:
                     yield ev(f"Aviso: falha ao capturar {current_url} ({exc})", level="error")
                     continue
@@ -574,6 +656,19 @@ def download_site(
 
             context.close()
             browser.close()
+
+        yield ev("Varredura adicional de assets referenciados em HTML, CSS e JS...", progress=62)
+        for page_url, html_blob in pages_raw.items():
+            for asset_url in _discover_asset_urls_from_text(html_blob, page_url):
+                ensure_resource(asset_url)
+        for abs_url, entry in list(resources.items()):
+            if entry["local_path"].endswith((".css", ".js", ".mjs", ".json", ".txt")) and entry["disk_path"].exists():
+                try:
+                    blob = entry["disk_path"].read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    blob = ""
+                for asset_url in _discover_asset_urls_from_text(blob, abs_url):
+                    ensure_resource(asset_url)
 
         yield ev(
             f"Cobertura inicial concluída: {len(crawl_order)} páginas e {len(resources)} recursos observados.",
