@@ -159,6 +159,8 @@ def download():
                         "filename": zip_path.name,
                         "size": size,
                         "files": summary.get("files") if summary else None,
+                        "pages": summary.get("pages") if summary else None,
+                        "unresolved": summary.get("unresolved") if summary else None,
                         "elapsed": elapsed_ms,
                         "downloadUrl": f"/file/{job_id}",
                         "designSystemUrl": (

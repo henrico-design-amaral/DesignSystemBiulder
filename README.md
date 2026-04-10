@@ -136,3 +136,15 @@ Resposta esperada:
 ```json
 {"status":"ok","active_capacity":2,"retention_seconds":600}
 ```
+
+
+## Novos controles de captura
+
+- `MAX_CRAWL_PAGES`: limite de páginas same-origin por execução
+- `MAX_CRAWL_DEPTH`: profundidade máxima do crawl
+- `MAX_CSS_IMPORT_DEPTH`: profundidade de resolução de `@import` em CSS
+- `capture-manifest.json`: relatório explícito de páginas, assets e URLs remotas não resolvidas
+
+## Escopo real
+
+O projeto agora trabalha como **capturador de site same-origin**, não apenas snapshot de uma página. Ainda assim, sites autenticados, apps altamente dinâmicos e experiências dependentes de backend em tempo real podem não ficar idênticos no modo offline.
