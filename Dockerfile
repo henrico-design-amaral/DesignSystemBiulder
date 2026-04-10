@@ -15,7 +15,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Instala Playwright + Chromium
+# Instala Playwright + Chromium dentro do container
+# PLAYWRIGHT_BROWSERS_PATH garante que fica em local conhecido
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium --with-deps
 
 # Copia código
@@ -24,6 +26,5 @@ COPY . .
 # Pasta de downloads temporários
 RUN mkdir -p downloads
 
-EXPOSE 5001
-
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5001", "--workers", "2", "--timeout", "120", "--worker-class", "sync"]
+# Railway injeta PORT dinamicamente
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --timeout 180 --worker-class sync --log-level debug"]

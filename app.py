@@ -5,7 +5,6 @@ import threading
 import time
 from pathlib import Path
 from flask import Flask, render_template, request, Response, send_file, jsonify
-from downloader import download_site
 
 app = Flask(__name__)
 
@@ -16,7 +15,7 @@ DOWNLOADS_DIR.mkdir(exist_ok=True)
 def cleanup_old_files():
     while True:
         now = time.time()
-        for f in DOWNLOADS_DIR.glob("*.zip"):
+        for f in DOWNLOADS_DIR.glob("*"):
             if now - f.stat().st_mtime > 600:
                 f.unlink(missing_ok=True)
         time.sleep(60)
@@ -29,11 +28,19 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/healthz")
+def health():
+    return "ok", 200
+
+
 @app.route("/download")
 def download():
     url = request.args.get("url", "").strip()
     if not url:
-        return Response("data: {\"type\": \"error\", \"msg\": \"URL ausente.\"}\n\n", mimetype="text/event-stream")
+        return Response(
+            'data: {"type": "error", "msg": "URL ausente."}\n\n',
+            mimetype="text/event-stream"
+        )
 
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -52,6 +59,9 @@ def download():
             yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
         try:
+            # Import lazy — evita crash na inicialização se Playwright não estiver pronto
+            from downloader import download_site
+
             yield from emit({"type": "log", "msg": f"Iniciando captura de {url}", "level": "accent"})
             yield from emit({"type": "log", "msg": f"Opções: JS={options['js']} · Lazy={options['lazy']} · Limpeza={options['clean']}", "level": ""})
 
@@ -60,11 +70,13 @@ def download():
 
             if zip_path.exists():
                 size = zip_path.stat().st_size
+                ds_path = DOWNLOADS_DIR / f"{job_id}-design-system.html"
                 yield from emit({
                     "type": "done",
                     "filename": zip_path.name,
                     "size": size,
                     "downloadUrl": f"/file/{job_id}",
+                    "designSystemUrl": f"/design-system/{job_id}" if ds_path.exists() else None,
                 })
             else:
                 yield from emit({"type": "error", "msg": "Falha ao gerar o arquivo ZIP."})
@@ -72,13 +84,15 @@ def download():
         except Exception as e:
             yield from emit({"type": "error", "msg": str(e)})
 
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 @app.route("/file/<job_id>")
 def get_file(job_id):
-    # Sanitize: só permite alphanum e hífens
     safe_id = "".join(c for c in job_id if c.isalnum() or c == "-")
     zip_path = DOWNLOADS_DIR / f"{safe_id}.zip"
     if not zip_path.exists():
@@ -86,7 +100,15 @@ def get_file(job_id):
     return send_file(zip_path, as_attachment=True, download_name=zip_path.name)
 
 
+@app.route("/design-system/<job_id>")
+def get_design_system(job_id):
+    safe_id = "".join(c for c in job_id if c.isalnum() or c == "-")
+    ds_path = DOWNLOADS_DIR / f"{safe_id}-design-system.html"
+    if not ds_path.exists():
+        return jsonify({"error": "Design system não encontrado ou expirado."}), 404
+    return send_file(ds_path, mimetype="text/html")
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5001))
-    debug = os.environ.get("FLASK_ENV") == "development"
-    app.run(host="0.0.0.0", port=port, debug=debug, threaded=True)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

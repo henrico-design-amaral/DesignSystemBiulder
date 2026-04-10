@@ -98,3 +98,25 @@ capturar/
 ## Licença
 
 Uso pessoal e educacional.
+
+## Design System Generator
+
+Após cada download, o sistema gera automaticamente um `design-system.html` extraído do HTML capturado.
+
+O arquivo documenta:
+- **Hero** — clone exato do original
+- **Typography** — escala tipográfica real do DOM
+- **Colors & Surfaces** — cores extraídas de classes Tailwind arbitrárias e camadas glass
+- **Components** — nav, botões, badges, cards retirados literalmente do markup
+- **Layout** — containers, grids e ritmo de espaçamento
+- **Motion** — keyframes e classes de transição do CSS original
+- **Icons** — conjunto de ícones com markup exato (se presente)
+
+O botão **Design System** aparece ao lado do **Baixar ZIP** após a captura ser concluída. O arquivo abre em nova aba e expira junto com o ZIP (10 minutos).
+
+### Regras de extração
+
+- Nunca reinventa classes
+- Nunca cria componentes ausentes do HTML fonte  
+- Sempre referencia os assets originais (CSS, JS, fontes)
+- Nunca normaliza markup nem interpola estilos

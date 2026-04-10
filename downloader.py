@@ -273,7 +273,26 @@ def download_site(url: str, zip_path: Path, options: dict):
 
     size_kb = zip_path.stat().st_size // 1024
     yield ev(
-        f"Concluído. ZIP gerado com {len(asset_map) + 1} arquivos ({size_kb} KB).",
+        f"ZIP gerado com {len(asset_map) + 1} arquivos ({size_kb} KB).",
         level="success",
-        progress=100,
+        progress=97,
     )
+
+    # ------------------------------------------------------------------
+    # 5. Gerar design-system.html
+    # ------------------------------------------------------------------
+    yield ev("Extraindo design system do HTML capturado...", progress=98)
+    try:
+        from design_system_generator import generate_design_system
+        ds_path = zip_path.with_name(zip_path.stem + "-design-system.html")
+        ok = generate_design_system(zip_path, ds_path)
+        if ok:
+            yield ev(
+                f"Design system gerado → {ds_path.name}",
+                level="accent",
+                progress=100,
+            )
+        else:
+            yield ev("Design system não pôde ser gerado (HTML sem evidência suficiente).", level="")
+    except Exception as e:
+        yield ev(f"Aviso: design system ignorado ({e})", level="")
