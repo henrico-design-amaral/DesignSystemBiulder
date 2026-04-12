@@ -4,6 +4,8 @@ WORKDIR /app
 COPY . .
 
 RUN pip install -r requirements.txt
-RUN playwright install chromium
 
-CMD ["python","app.py"]
+# ESSENCIAL NO RAILWAY
+RUN playwright install --with-deps chromium
+
+CMD ["python", "app.py"]
