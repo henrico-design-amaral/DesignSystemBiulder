@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Website Capture Tool</title>
+</head>
+<body style="font-family: Arial; padding: 40px;">
+
+<h2>Website Capture Tool</h2>
+
+<input id="url" style="width:400px;" placeholder="https://example.com" />
+<button onclick="run()">Capturar</button>
+
+<pre id="out" style="margin-top:20px;background:#111;color:#0f0;padding:20px;"></pre>
+
+<script>
+async function run() {
+  const url = document.getElementById('url').value;
+  const res = await fetch(`/capture?url=${encodeURIComponent(url)}`);
+  const data = await res.json();
+  document.getElementById('out').innerText = JSON.stringify(data, null, 2);
+}
+</script>
+
+</body>
+</html>
